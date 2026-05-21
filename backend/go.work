@@ -1,0 +1,29 @@
+go 1.25.0
+
+use (
+	./pkg
+	./services/audit-log-service
+	./services/auth-service
+	./services/chat-service
+	./services/delivery-order-service
+	./services/email-service
+	./services/food-order-service
+	./services/gateway
+	./services/geo-service
+	./services/history-service
+	./services/matching-service
+	./services/merchant-service
+	./services/notification-service
+	./services/payment-service
+	./services/pricing-service
+	./services/promotion-service
+	./services/push-service
+	./services/rating-service
+	./services/ride-order-service
+	./services/search-service
+	./services/security-service
+	./services/sms-service
+	./services/tracking-service
+	./services/user-service
+	./services/wallet-service
+)

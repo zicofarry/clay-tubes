@@ -1,0 +1,1418 @@
+openapi: 3.0.3
+info:
+  title: Clay Delivery Order Service API
+  description: |
+    Manages the full lifecycle of package delivery orders (GoSend) on the Clay platform.
+
+    **Database:**
+    - PostgreSQL — delivery_orders, delivery_packages, delivery_state_logs, delivery_fare_breakdown
+    - Redis — hot order state cache (TTL 2h), anti-duplicate-booking lock
+
+    **State Machine:**
+    ```
+    pending → finding_driver → assigned → on_pickup → picked_up → on_delivery → delivered
+                                        ↘           ↘           ↘            ↘
+                                         cancelled   cancelled   cancelled    cancelled
+    ```
+
+    **Key difference from Ride Order:**
+    - Sender & recipient are separate entities (can differ from the user placing the order)
+    - Package metadata (weight, size, category, insurance) affects fare
+    - No OTP for pickup — driver takes photo of package as proof of pickup
+    - Recipient confirms delivery (or driver takes photo as proof)
+
+    **Kafka Events Produced:**
+    - `Order_Created`   — consumed by Matching, Chat, Notification
+    - `Order_Cancelled` — consumed by Payment, Matching, Notification
+    - `Trip_Completed`  — consumed by Payment, Rating, Chat, Notification
+
+    **Kafka Events Consumed:**
+    - `Driver_Found` (from Matching Service) — updates order to `assigned`
+  version: 1.0.0
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://localhost:3004/api/v1
+    description: Local development
+  - url: https://api.clay.id/delivery/v1
+    description: Production (via API Gateway)
+
+tags:
+  - name: Order
+    description: User-facing delivery order management
+  - name: Driver
+    description: Driver-facing delivery order actions
+  - name: Fare
+    description: Fare estimation & breakdown
+  - name: Internal
+    description: Internal service-to-service endpoints (not exposed via API Gateway)
+
+paths:
+  # ─────────────────────────── Fare ───────────────────────────
+  /orders/estimate:
+    post:
+      operationId: estimateDeliveryFare
+      tags: [Fare]
+      summary: Estimate delivery fare before creating an order
+      description: |
+        Calls Pricing Service and Geo Service to compute fare estimate
+        based on pickup/destination coordinates, package weight, size,
+        and any active surge zones.
+        Does not create an order.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FareEstimateRequest'
+      responses:
+        '200':
+          description: Fare estimate calculated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FareEstimateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─────────────────────────── Order ───────────────────────────
+  /orders:
+    post:
+      operationId: createDeliveryOrder
+      tags: [Order]
+      summary: Create a new delivery order (GoSend)
+      description: |
+        Creates a delivery order and publishes `Order_Created` to Kafka.
+        Matching Service consumes this event to find a nearby driver.
+
+        **Pre-conditions:**
+        - User must not have an active delivery order (`user:active_delivery:{user_id}` Redis key must be empty)
+        - GoPay: payment hold initiated via Payment Service before Kafka publish
+        - Cash: fare collected at delivery
+
+        **Anti-duplicate-booking:** Sets `user:active_delivery:{user_id}` in Redis (TTL 2h).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDeliveryOrderRequest'
+      responses:
+        '201':
+          description: Delivery order created — driver search initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryOrderResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: User already has an active delivery order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: ACTIVE_ORDER_EXISTS
+                  message: You already have an active delivery order
+        '422':
+          description: Promo code invalid or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Upstream service unavailable (Pricing / Payment)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /orders/active:
+    get:
+      operationId: getActiveDeliveryOrder
+      tags: [Order]
+      summary: Get current user's active delivery order
+      description: |
+        Returns the user's currently active delivery order if any.
+        Served from Redis cache (`delivery_order:{order_id}`) when available.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Active delivery order found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryOrderResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No active delivery order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: NO_ACTIVE_ORDER
+                  message: No active delivery order found for this user
+
+  /orders/history:
+    get:
+      operationId: getDeliveryOrderHistory
+      tags: [Order]
+      summary: Get user's delivery order history (paginated)
+      description: |
+        Returns paginated list of the authenticated user's past delivery orders.
+        Sorted by `created_at DESC`.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [delivered, cancelled]
+          description: Filter by final status
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Start date filter (inclusive), e.g. 2025-01-01
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+          description: End date filter (inclusive), e.g. 2025-12-31
+      responses:
+        '200':
+          description: Paginated list of past delivery orders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryOrderHistoryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /orders/{orderId}:
+    get:
+      operationId: getDeliveryOrder
+      tags: [Order]
+      summary: Get delivery order detail by ID
+      description: |
+        Returns full order detail including package info, state logs,
+        and delivery proof photos (if available).
+        User can only access their own orders.
+        Driver can access orders assigned to them.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Delivery order detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryOrderDetailResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — order does not belong to this user/driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /orders/{orderId}/cancel:
+    post:
+      operationId: cancelDeliveryOrder
+      tags: [Order]
+      summary: Cancel a delivery order
+      description: |
+        Cancels the order if it is in a cancellable state.
+
+        **Cancellable states:** `pending`, `finding_driver`, `assigned`, `on_pickup`
+        **Non-cancellable states:** `picked_up`, `on_delivery`, `delivered`, `cancelled`
+
+        Once driver has physically picked up the package (`picked_up` state),
+        the order can no longer be cancelled by the user.
+
+        Publishes `Order_Cancelled` Kafka event on success.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 255
+                  example: "Alamat tujuan salah"
+      responses:
+        '200':
+          description: Order cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryOrderResponse'
+        '400':
+          description: Order is in a non-cancellable state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: CANNOT_CANCEL_PICKED_UP
+                  message: Cannot cancel an order after package has been picked up
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the order owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /orders/{orderId}/rate:
+    post:
+      operationId: submitDeliveryRating
+      tags: [Order]
+      summary: Submit rating after delivery is completed
+      description: |
+        Submits a rating for the delivered order. Validates order ownership
+        and `delivered` status, then forwards to Rating Service.
+        Can only be submitted once per order.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitRatingRequest'
+      responses:
+        '201':
+          description: Rating submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the order owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Rating already submitted for this order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: RATING_ALREADY_SUBMITTED
+                  message: You have already rated this order
+        '422':
+          description: Order is not in delivered state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: ORDER_NOT_DELIVERED
+                  message: Can only rate a delivered order
+
+  /orders/{orderId}/fare-breakdown:
+    get:
+      operationId: getDeliveryFareBreakdown
+      tags: [Fare]
+      summary: Get fare breakdown for a delivered order
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Fare breakdown
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FareBreakdownResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the order owner or assigned driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found or fare not yet finalized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Driver ───────────────────────────
+  /driver/orders/{orderId}/accept:
+    post:
+      operationId: driverAcceptDeliveryOrder
+      tags: [Driver]
+      summary: Driver accepts a broadcast delivery order
+      description: |
+        Called by driver app when driver taps "Accept" on a broadcasted order.
+        Transitions order from `finding_driver` → `assigned`.
+
+        Returns full order details including sender/recipient info and package details
+        so driver knows where to go and what to pick up.
+
+        If another driver already accepted (race condition), returns `409 ALREADY_TAKEN`.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Order accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriverAcceptResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — caller is not a driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Order already taken by another driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: ORDER_ALREADY_TAKEN
+                  message: This order has already been accepted by another driver
+
+  /driver/orders/{orderId}/reject:
+    post:
+      operationId: driverRejectDeliveryOrder
+      tags: [Driver]
+      summary: Driver rejects a broadcast delivery order
+      description: |
+        Notifies Matching Service to remove this driver from the broadcast list
+        and try the next candidate.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  enum: [too_far, wrong_direction, package_too_heavy, personal_reason, other]
+                  example: too_far
+      responses:
+        '200':
+          description: Order rejected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — caller is not a driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /driver/orders/{orderId}/status:
+    put:
+      operationId: driverUpdateDeliveryStatus
+      tags: [Driver]
+      summary: Driver updates delivery order status
+      description: |
+        Unified endpoint for driver to progress the delivery through its lifecycle.
+
+        **Allowed transitions per `action`:**
+
+        | action | from_state | to_state | extra required |
+        |--------|-----------|----------|----------------|
+        | `arrived_at_pickup` | `assigned` | `on_pickup` | — |
+        | `picked_up` | `on_pickup` | `picked_up` | `pickup_photo_url` (proof of pickup) |
+        | `start_delivery` | `picked_up` | `on_delivery` | — |
+        | `complete_delivery` | `on_delivery` | `delivered` | `actual_distance_km`, `actual_duration_min`, `delivery_photo_url` |
+
+        On `complete_delivery`: calculates `fare_final`, publishes `Trip_Completed`.
+        `pickup_photo_url` and `delivery_photo_url` are pre-signed S3 URLs uploaded
+        by the driver app before calling this endpoint.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DriverUpdateStatusRequest'
+      responses:
+        '200':
+          description: Status updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryOrderResponse'
+        '400':
+          description: Invalid action, wrong state, or missing required fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missing_photo:
+                  summary: Pickup photo missing
+                  value:
+                    status: error
+                    error:
+                      code: PICKUP_PHOTO_REQUIRED
+                      message: pickup_photo_url is required for picked_up action
+                wrong_state:
+                  summary: Order not in expected state
+                  value:
+                    status: error
+                    error:
+                      code: INVALID_STATE_TRANSITION
+                      message: Cannot perform start_delivery on order in assigned state
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the assigned driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Internal ───────────────────────────
+  /internal/orders:
+    post:
+      operationId: internalCreateDeliveryOrder
+      tags: [Internal]
+      summary: Create delivery order from internal orchestrator
+      description: |
+        Allows an internal orchestrator to create a delivery order on behalf
+        of a user. Skips payment hold — assumes caller has handled it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalCreateOrderRequest'
+      responses:
+        '201':
+          description: Delivery order created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryOrderResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          description: User already has an active delivery order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/orders/{orderId}:
+    get:
+      operationId: internalGetDeliveryOrder
+      tags: [Internal]
+      summary: Get delivery order data for internal service calls
+      description: |
+        Called by Chat, Tracking, and Notification services to get
+        order context. Not exposed via API Gateway.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Delivery order internal data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryOrderInternalResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/orders/{orderId}/status:
+    put:
+      operationId: internalUpdateDeliveryStatus
+      tags: [Internal]
+      summary: Update delivery order status from another service
+      description: |
+        General-purpose status update for internal services.
+        Used by Matching Service to transition `finding_driver → assigned`
+        or `finding_driver → cancelled` (no driver found).
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalUpdateStatusRequest'
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryOrderInternalResponse'
+        '400':
+          description: Invalid state transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Order is already in a terminal state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/orders/{orderId}/assign-driver:
+    put:
+      operationId: internalAssignDeliveryDriver
+      tags: [Internal]
+      summary: Assign driver to delivery order (called by Matching Service)
+      description: |
+        Atomically assigns a driver and transitions `finding_driver → assigned`.
+        Unlike ride orders, no OTP is generated — driver uses photo proof instead.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [driver_id, eta_seconds]
+              properties:
+                driver_id:
+                  type: string
+                  format: uuid
+                eta_seconds:
+                  type: integer
+                  description: ETA for driver to arrive at pickup location
+                  example: 240
+      responses:
+        '200':
+          description: Driver assigned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    properties:
+                      order_id:
+                        type: string
+                        format: uuid
+                      driver_id:
+                        type: string
+                        format: uuid
+                      status:
+                        type: string
+                        example: assigned
+                      eta_seconds:
+                        type: integer
+                        example: 240
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Order is no longer in finding_driver state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Health ───────────────────────────
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: clay-delivery-order-service
+                  timestamp:
+                    type: string
+                    format: date-time
+
+# ═══════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Delivery order UUID
+
+  schemas:
+    # ── Request Schemas ───────────────────────────────────────────
+    CreateDeliveryOrderRequest:
+      type: object
+      required:
+        - sender_name
+        - sender_phone
+        - pickup_lat
+        - pickup_lng
+        - recipient_name
+        - recipient_phone
+        - dest_lat
+        - dest_lng
+        - payment_method
+        - package
+      properties:
+        sender_name:
+          type: string
+          maxLength: 100
+          example: "Budi Santoso"
+        sender_phone:
+          type: string
+          pattern: '^\+62[0-9]{9,13}$'
+          example: "+6281234567890"
+        pickup_lat:
+          type: number
+          format: double
+          example: -6.914744
+        pickup_lng:
+          type: number
+          format: double
+          example: 107.609810
+        pickup_address:
+          type: string
+          example: "Jl. Braga No.1, Bandung"
+        pickup_notes:
+          type: string
+          example: "Hubungi dulu sebelum datang"
+          maxLength: 255
+        recipient_name:
+          type: string
+          maxLength: 100
+          example: "Siti Rahayu"
+        recipient_phone:
+          type: string
+          pattern: '^\+62[0-9]{9,13}$'
+          example: "+6289876543210"
+        dest_lat:
+          type: number
+          format: double
+          example: -6.921000
+        dest_lng:
+          type: number
+          format: double
+          example: 107.607000
+        dest_address:
+          type: string
+          example: "Jl. Dago No.5, Bandung"
+        dest_notes:
+          type: string
+          example: "Titipkan ke satpam jika tidak ada"
+          maxLength: 255
+        payment_method:
+          type: string
+          enum: [gopay, cash]
+          example: gopay
+        promo_id:
+          type: string
+          format: uuid
+          nullable: true
+        package:
+          $ref: '#/components/schemas/PackageInput'
+        fare_estimate:
+          type: number
+          format: double
+          description: Client-side estimate for display only — server recalculates
+          example: 15000
+
+    PackageInput:
+      type: object
+      required: [category, size]
+      properties:
+        category:
+          type: string
+          enum: [document, food, electronics, clothing, fragile, other]
+          example: document
+        weight_kg:
+          type: number
+          format: double
+          minimum: 0
+          example: 0.5
+        size:
+          type: string
+          enum: [small, medium, large]
+          example: small
+        is_fragile:
+          type: boolean
+          default: false
+        description:
+          type: string
+          maxLength: 255
+          example: "Dokumen penting"
+        insurance_value:
+          type: number
+          format: double
+          minimum: 0
+          nullable: true
+          description: Declared value for insurance. null means no insurance.
+          example: null
+
+    FareEstimateRequest:
+      type: object
+      required: [pickup_lat, pickup_lng, dest_lat, dest_lng, package]
+      properties:
+        pickup_lat:
+          type: number
+          format: double
+        pickup_lng:
+          type: number
+          format: double
+        dest_lat:
+          type: number
+          format: double
+        dest_lng:
+          type: number
+          format: double
+        package:
+          $ref: '#/components/schemas/PackageInput'
+        promo_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    DriverUpdateStatusRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [arrived_at_pickup, picked_up, start_delivery, complete_delivery]
+          example: picked_up
+        pickup_photo_url:
+          type: string
+          format: uri
+          description: Required when action = picked_up. Pre-signed S3 URL.
+          example: "https://cdn.clay.id/delivery/proof/pickup_abc123.jpg"
+        actual_distance_km:
+          type: number
+          format: double
+          description: Required when action = complete_delivery
+          example: 4.1
+        actual_duration_min:
+          type: integer
+          description: Required when action = complete_delivery
+          example: 22
+        delivery_photo_url:
+          type: string
+          format: uri
+          description: Required when action = complete_delivery. Proof of delivery.
+          example: "https://cdn.clay.id/delivery/proof/delivery_abc123.jpg"
+        delivery_lat:
+          type: number
+          format: double
+          description: Optional — actual delivery coordinates
+        delivery_lng:
+          type: number
+          format: double
+
+    SubmitRatingRequest:
+      type: object
+      required: [score]
+      properties:
+        score:
+          type: integer
+          minimum: 1
+          maximum: 5
+          example: 5
+        comment:
+          type: string
+          maxLength: 500
+          example: "Paket diterima dengan aman, driver sangat hati-hati"
+        tags:
+          type: array
+          items:
+            type: string
+          example: ["careful", "on_time", "friendly"]
+
+    InternalCreateOrderRequest:
+      allOf:
+        - $ref: '#/components/schemas/CreateDeliveryOrderRequest'
+        - type: object
+          required: [user_id]
+          properties:
+            user_id:
+              type: string
+              format: uuid
+              description: User ID on whose behalf the order is being created
+
+    InternalUpdateStatusRequest:
+      type: object
+      required: [status, actor_type]
+      properties:
+        status:
+          type: string
+          enum: [finding_driver, assigned, on_pickup, picked_up, on_delivery, delivered, cancelled]
+        actor_type:
+          type: string
+          enum: [user, driver, system]
+          example: system
+        actor_id:
+          type: string
+          format: uuid
+          nullable: true
+        reason:
+          type: string
+          example: no_driver_found
+        metadata:
+          type: object
+          additionalProperties: true
+
+    # ── Core Object Schemas ───────────────────────────────────────
+    DeliveryPackage:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        category:
+          type: string
+          enum: [document, food, electronics, clothing, fragile, other]
+        weight_kg:
+          type: number
+          format: double
+          nullable: true
+        size:
+          type: string
+          enum: [small, medium, large]
+        is_fragile:
+          type: boolean
+        description:
+          type: string
+          nullable: true
+        insurance_value:
+          type: number
+          format: double
+          nullable: true
+        photo_url:
+          type: string
+          nullable: true
+          description: Package photo uploaded by sender at time of order
+
+    DeliveryProof:
+      type: object
+      description: Photos taken by driver as proof of pickup and delivery
+      properties:
+        pickup_photo_url:
+          type: string
+          format: uri
+          nullable: true
+        delivery_photo_url:
+          type: string
+          format: uri
+          nullable: true
+        picked_up_at:
+          type: string
+          format: date-time
+          nullable: true
+        delivered_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    DeliveryOrder:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        driver_id:
+          type: string
+          format: uuid
+          nullable: true
+        status:
+          type: string
+          enum: [pending, finding_driver, assigned, on_pickup, picked_up, on_delivery, delivered, cancelled]
+        sender_name:
+          type: string
+        sender_phone:
+          type: string
+        pickup_lat:
+          type: number
+          format: double
+        pickup_lng:
+          type: number
+          format: double
+        pickup_address:
+          type: string
+        pickup_notes:
+          type: string
+          nullable: true
+        recipient_name:
+          type: string
+        recipient_phone:
+          type: string
+        dest_lat:
+          type: number
+          format: double
+        dest_lng:
+          type: number
+          format: double
+        dest_address:
+          type: string
+        dest_notes:
+          type: string
+          nullable: true
+        fare_estimate:
+          type: number
+          format: double
+        fare_final:
+          type: number
+          format: double
+          nullable: true
+        payment_method:
+          type: string
+          enum: [gopay, cash]
+        cancel_reason:
+          type: string
+          nullable: true
+        cancelled_by:
+          type: string
+          enum: [user, driver, system]
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    OrderStateLog:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        from_state:
+          type: string
+          nullable: true
+        to_state:
+          type: string
+        actor_type:
+          type: string
+          enum: [user, driver, system]
+        reason:
+          type: string
+          nullable: true
+        changed_at:
+          type: string
+          format: date-time
+
+    FareBreakdown:
+      type: object
+      properties:
+        base_fare:
+          type: number
+          format: double
+        distance_fare:
+          type: number
+          format: double
+        weight_surcharge:
+          type: number
+          format: double
+          description: Extra charge for heavy packages
+        insurance_fee:
+          type: number
+          format: double
+        promo_discount:
+          type: number
+          format: double
+        platform_fee:
+          type: number
+          format: double
+        total:
+          type: number
+          format: double
+
+    # ── Response Schemas ──────────────────────────────────────────
+    DeliveryOrderResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/DeliveryOrder'
+
+    DeliveryOrderDetailResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          allOf:
+            - $ref: '#/components/schemas/DeliveryOrder'
+            - type: object
+              properties:
+                package:
+                  $ref: '#/components/schemas/DeliveryPackage'
+                proof:
+                  $ref: '#/components/schemas/DeliveryProof'
+                state_logs:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/OrderStateLog'
+
+    DeliveryOrderHistoryResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeliveryOrder'
+        meta:
+          type: object
+          properties:
+            page:
+              type: integer
+              example: 1
+            limit:
+              type: integer
+              example: 10
+            total:
+              type: integer
+              example: 28
+            total_pages:
+              type: integer
+              example: 3
+
+    DriverAcceptResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            order_id:
+              type: string
+              format: uuid
+            status:
+              type: string
+              example: assigned
+            sender_name:
+              type: string
+            sender_phone:
+              type: string
+            pickup_lat:
+              type: number
+              format: double
+            pickup_lng:
+              type: number
+              format: double
+            pickup_address:
+              type: string
+            pickup_notes:
+              type: string
+              nullable: true
+            recipient_name:
+              type: string
+            recipient_phone:
+              type: string
+            dest_address:
+              type: string
+            fare_estimate:
+              type: number
+              format: double
+            payment_method:
+              type: string
+            package:
+              $ref: '#/components/schemas/DeliveryPackage'
+
+    FareEstimateResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            distance_km:
+              type: number
+              format: double
+              example: 4.1
+            duration_min:
+              type: integer
+              example: 22
+            fare_estimate:
+              type: number
+              format: double
+              example: 15000
+            surge_multiplier:
+              type: number
+              format: double
+              example: 1.0
+            promo_discount:
+              type: number
+              format: double
+              example: 0
+            fare_after_promo:
+              type: number
+              format: double
+              example: 15000
+            breakdown:
+              $ref: '#/components/schemas/FareBreakdown'
+
+    FareBreakdownResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/FareBreakdown'
+
+    DeliveryOrderInternalResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+            driver_id:
+              type: string
+              format: uuid
+              nullable: true
+            status:
+              type: string
+            payment_method:
+              type: string
+            fare_final:
+              type: number
+              nullable: true
+            created_at:
+              type: string
+              format: date-time
+
+    # ── Common ────────────────────────────────────────────────────
+    MessageResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: ORDER_NOT_FOUND
+            message:
+              type: string
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'

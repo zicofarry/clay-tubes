@@ -1,0 +1,15 @@
+# Binaries
+delivery-order-service
+*.exe
+
+# Go
+vendor/
+*.test
+
+# IDE
+.idea/
+.vscode/
+
+# Environment
+.env
+*.env.local

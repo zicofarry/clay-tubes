@@ -1,0 +1,41 @@
+services:
+  mongo-chat:
+    image: mongo:7
+    container_name: clay_chat_mongo
+    environment:
+      MONGO_INITDB_DATABASE: chat_db
+    ports:
+      - "27017:27017" 
+    volumes:
+      - mongo_chat_data:/data/db
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongo-express-chat:
+    image: mongo-express:latest
+    container_name: clay_chat_mongo_express
+    restart: always
+    ports:
+      - "8086:8081" # shared port for mongo-express
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://mongo-chat:27017/
+    depends_on:
+      - mongo-chat
+
+  chat-service:
+    build: .
+    container_name: clay_chat_service
+    ports:
+      - "8008:8008" # Based on PORT_MAPPING.md
+    environment:
+      - MONGO_URI=mongodb://mongo-chat:27017
+      - MONGO_DB_NAME=chat_db
+      - PORT=8008
+    depends_on:
+      - mongo-chat
+
+volumes:
+  mongo_chat_data:

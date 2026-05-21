@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  mongo-tracking:
+    image: mongo:7
+    container_name: clay_tracking_mongo
+    environment:
+      MONGO_INITDB_DATABASE: tracking_db
+    ports:
+      - "27019:27017"
+    volumes:
+      - mongo_tracking_data:/data/db
+
+  mongo-express:
+    image: mongo-express
+    container_name: clay_tracking_mongo_express
+    restart: always
+    ports:
+      - "9024:8081"
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://mongo-tracking:27017/
+    depends_on:
+      - mongo-tracking
+
+  redis-tracking:
+    image: redis:7-alpine
+    container_name: clay_tracking_redis
+    ports:
+      - "6376:6379"
+
+volumes:
+  mongo_tracking_data:

@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  redis-sms:
+    image: redis:7-alpine
+    container_name: clay_sms_redis
+    ports:
+      - "9021:6379" # Mapping to different host port
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5

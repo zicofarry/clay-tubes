@@ -1,0 +1,1070 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Clay Platform — Local Development Docker Compose
+# Run: docker-compose up -d
+# Stop: docker-compose down -v
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  clay-net:
+    driver: bridge
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INFRASTRUCTURE LAYER
+# ─────────────────────────────────────────────────────────────────────────────
+services:
+
+  # ─── Kafka ──────────────────────────────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: clay-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks: [clay-net]
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: clay-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks: [clay-net]
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: clay-kafka-ui
+    depends_on: [kafka]
+    ports:
+      - "9000:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: clay-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    networks: [clay-net]
+
+  # ─── Elasticsearch ───────────────────────────────────────────────────────────
+  elasticsearch:
+    image: elasticsearch:8.13.0
+    container_name: clay-elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    networks: [clay-net]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200/_cluster/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ─── Gateway Redis ──────────────────────────────────────────────────────────
+  redis-gateway:
+    image: redis:7-alpine
+    container_name: clay-redis-gateway
+    ports:
+      - "6370:6379"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # API GATEWAY
+  # ─────────────────────────────────────────────────────────────────────────────
+  clay-gateway:
+    build:
+      context: ../clay-gateway
+      dockerfile: Dockerfile
+    container_name: clay-gateway
+    depends_on: [kafka, redis-gateway]
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      REDIS_ADDR: redis-gateway:6379
+      ROUTES_FILE: config/routes.yaml
+      JWT_SECRET: ${JWT_SECRET:-clay-super-secret-key}
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # AUTH SERVICE  (8001)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-auth:
+    image: postgres:16-alpine
+    container_name: clay-postgres-auth
+    environment:
+      POSTGRES_DB: clay_auth
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5431:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-auth-data:/var/lib/postgresql/data
+
+  redis-auth:
+    image: redis:7-alpine
+    container_name: clay-redis-auth
+    ports:
+      - "6371:6379"
+    networks: [clay-net]
+
+  clay-auth-service:
+    build:
+      context: ../clay-auth-service
+      dockerfile: Dockerfile
+    container_name: clay-auth-service
+    depends_on: [postgres-auth, redis-auth, kafka]
+    ports:
+      - "8001:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-auth
+      DB_PORT: "5432"
+      DB_NAME: clay_auth
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_HOST: redis-auth
+      REDIS_PORT: "6379"
+      KAFKA_BROKERS: kafka:9092
+      JWT_SECRET: ${JWT_SECRET:-clay-super-secret-key}
+    networks: [clay-net]
+
+  adminer-auth:
+    image: adminer
+    container_name: clay-adminer-auth
+    ports:
+      - "9001:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # USER SERVICE  (8002)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-user:
+    image: postgres:16-alpine
+    container_name: clay-postgres-user
+    environment:
+      POSTGRES_DB: clay_user
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5432:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-user-data:/var/lib/postgresql/data
+
+  redis-user:
+    image: redis:7-alpine
+    container_name: clay-redis-user
+    ports:
+      - "6372:6379"
+    networks: [clay-net]
+
+  clay-user-service:
+    build:
+      context: ../clay-user-service
+      dockerfile: Dockerfile
+    container_name: clay-user-service
+    depends_on: [postgres-user, redis-user]
+    ports:
+      - "8002:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-user
+      DB_NAME: clay_user
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_HOST: redis-user
+    networks: [clay-net]
+
+  adminer-user:
+    image: adminer
+    container_name: clay-adminer-user
+    ports:
+      - "9002:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EMAIL SERVICE  (8003)
+  # ─────────────────────────────────────────────────────────────────────────────
+  redis-email:
+    image: redis:7-alpine
+    container_name: clay-redis-email
+    ports:
+      - "6373:6379"
+    networks: [clay-net]
+
+  clay-email-service:
+    build:
+      context: ../clay-email-service
+      dockerfile: Dockerfile
+    container_name: clay-email-service
+    depends_on: [redis-email, kafka]
+    ports:
+      - "8003:8080"
+    environment:
+      PORT: "8080"
+      REDIS_ADDR: redis-email:6379
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP: clay-email-service
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # PAYMENT SERVICE  (8004)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-payment:
+    image: postgres:16-alpine
+    container_name: clay-postgres-payment
+    environment:
+      POSTGRES_DB: clay_payment
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5434:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-payment-data:/var/lib/postgresql/data
+
+  redis-payment:
+    image: redis:7-alpine
+    container_name: clay-redis-payment
+    ports:
+      - "6374:6379"
+    networks: [clay-net]
+
+  clay-payment-service:
+    build:
+      context: ../clay-payment-service
+      dockerfile: Dockerfile
+    container_name: clay-payment-service
+    depends_on: [postgres-payment, redis-payment, kafka]
+    ports:
+      - "8004:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-payment
+      DB_NAME: clay_payment
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_ADDR: redis-payment:6379
+      KAFKA_BROKERS: kafka:9092
+    networks: [clay-net]
+
+  adminer-payment:
+    image: adminer
+    container_name: clay-adminer-payment
+    ports:
+      - "9004:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # NOTIFICATION SERVICE  (8005)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-notification:
+    image: postgres:16-alpine
+    container_name: clay-postgres-notification
+    environment:
+      POSTGRES_DB: clay_notification
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5435:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-notification-data:/var/lib/postgresql/data
+
+  clay-notification-service:
+    build:
+      context: ../clay-notification-service
+      dockerfile: Dockerfile
+    container_name: clay-notification-service
+    depends_on: [postgres-notification, kafka]
+    ports:
+      - "8005:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-notification
+      DB_NAME: clay_notification
+      DB_USER: clay
+      DB_PASSWORD: clay
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP: clay-notification-service
+    networks: [clay-net]
+
+  adminer-notification:
+    image: adminer
+    container_name: clay-adminer-notification
+    ports:
+      - "9005:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # TRACKING SERVICE  (8006)
+  # ─────────────────────────────────────────────────────────────────────────────
+  mongo-tracking:
+    image: mongo:7
+    container_name: clay-mongo-tracking
+    ports:
+      - "27019:27017"
+    networks: [clay-net]
+    volumes:
+      - mongo-tracking-data:/data/db
+
+  redis-tracking:
+    image: redis:7-alpine
+    container_name: clay-redis-tracking
+    ports:
+      - "6376:6379"
+    networks: [clay-net]
+
+  clay-tracking-service:
+    build:
+      context: ../clay-tracking-service
+      dockerfile: Dockerfile
+    container_name: clay-tracking-service
+    depends_on: [mongo-tracking, redis-tracking]
+    ports:
+      - "8006:8080"
+    environment:
+      PORT: "8080"
+      MONGO_URI: mongodb://mongo-tracking:27017
+      MONGO_DB: clay_tracking
+      REDIS_ADDR: redis-tracking:6379
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # AUDIT LOG SERVICE  (8007)
+  # ─────────────────────────────────────────────────────────────────────────────
+  mongo-audit:
+    image: mongo:7
+    container_name: clay-mongo-audit
+    ports:
+      - "27018:27017"
+    networks: [clay-net]
+    volumes:
+      - mongo-audit-data:/data/db
+
+  clay-audit-log-service:
+    build:
+      context: ../clay-audit-log-service
+      dockerfile: Dockerfile
+    container_name: clay-audit-log-service
+    depends_on: [mongo-audit, kafka]
+    ports:
+      - "8007:8080"
+    environment:
+      PORT: "8080"
+      MONGO_URI: mongodb://mongo-audit:27017
+      MONGO_DB: clay_audit_log
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP: clay-audit-log-service
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CHAT SERVICE  (8008)
+  # ─────────────────────────────────────────────────────────────────────────────
+  mongo-chat:
+    image: mongo:7
+    container_name: clay-mongo-chat
+    ports:
+      - "27017:27017"
+    networks: [clay-net]
+    volumes:
+      - mongo-chat-data:/data/db
+
+  clay-chat-service:
+    build:
+      context: ../clay-chat-service
+      dockerfile: Dockerfile
+    container_name: clay-chat-service
+    depends_on: [mongo-chat]
+    ports:
+      - "8008:8080"
+    environment:
+      PORT: "8080"
+      MONGO_URI: mongodb://mongo-chat:27017
+      MONGO_DB: clay_chat
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # GEO SERVICE  (8009)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-geo:
+    image: postgres:16-alpine
+    container_name: clay-postgres-geo
+    environment:
+      POSTGRES_DB: clay_geo
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5439:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-geo-data:/var/lib/postgresql/data
+
+  redis-geo:
+    image: redis:7-alpine
+    container_name: clay-redis-geo
+    ports:
+      - "6379:6379"
+    networks: [clay-net]
+
+  clay-geo-service:
+    build:
+      context: ../clay-geo-service
+      dockerfile: Dockerfile
+    container_name: clay-geo-service
+    depends_on: [postgres-geo, redis-geo, kafka]
+    ports:
+      - "8009:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-geo
+      DB_NAME: clay_geo
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_ADDR: redis-geo:6379
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP: clay-geo-service
+    networks: [clay-net]
+
+  adminer-geo:
+    image: adminer
+    container_name: clay-adminer-geo
+    ports:
+      - "9009:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # MATCHING SERVICE  (8010)
+  # ─────────────────────────────────────────────────────────────────────────────
+  redis-matching:
+    image: redis:7-alpine
+    container_name: clay-redis-matching
+    ports:
+      - "6380:6379"
+    networks: [clay-net]
+
+  clay-matching-service:
+    build:
+      context: ../clay-matching-service
+      dockerfile: Dockerfile
+    container_name: clay-matching-service
+    depends_on: [redis-matching, clay-geo-service]
+    ports:
+      - "8010:8080"
+    environment:
+      PORT: "8080"
+      REDIS_ADDR: redis-matching:6379
+      GEO_SERVICE_URL: http://clay-geo-service:8080
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # MERCHANT SERVICE  (8011)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-merchant:
+    image: postgres:16-alpine
+    container_name: clay-postgres-merchant
+    environment:
+      POSTGRES_DB: clay_merchant
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5441:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-merchant-data:/var/lib/postgresql/data
+
+  mongo-merchant:
+    image: mongo:7
+    container_name: clay-mongo-merchant
+    ports:
+      - "27020:27017"
+    networks: [clay-net]
+    volumes:
+      - mongo-merchant-data:/data/db
+
+  clay-merchant-service:
+    build:
+      context: ../clay-merchant-service
+      dockerfile: Dockerfile
+    container_name: clay-merchant-service
+    depends_on: [postgres-merchant, mongo-merchant, kafka]
+    ports:
+      - "8011:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-merchant
+      DB_NAME: clay_merchant
+      DB_USER: clay
+      DB_PASSWORD: clay
+      MONGO_URI: mongodb://mongo-merchant:27017
+      MONGO_DB: clay_merchant
+      KAFKA_BROKERS: kafka:9092
+    networks: [clay-net]
+
+  adminer-merchant:
+    image: adminer
+    container_name: clay-adminer-merchant
+    ports:
+      - "9011:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # PRICING SERVICE  (8012)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-pricing:
+    image: postgres:16-alpine
+    container_name: clay-postgres-pricing
+    environment:
+      POSTGRES_DB: clay_pricing
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5442:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-pricing-data:/var/lib/postgresql/data
+
+  redis-pricing:
+    image: redis:7-alpine
+    container_name: clay-redis-pricing
+    ports:
+      - "6382:6379"
+    networks: [clay-net]
+
+  clay-pricing-service:
+    build:
+      context: ../clay-pricing-service
+      dockerfile: Dockerfile
+    container_name: clay-pricing-service
+    depends_on: [postgres-pricing, redis-pricing]
+    ports:
+      - "8012:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-pricing
+      DB_NAME: clay_pricing
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_ADDR: redis-pricing:6379
+    networks: [clay-net]
+
+  adminer-pricing:
+    image: adminer
+    container_name: clay-adminer-pricing
+    ports:
+      - "9012:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # PROMOTION SERVICE  (8013)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-promotion:
+    image: postgres:16-alpine
+    container_name: clay-postgres-promotion
+    environment:
+      POSTGRES_DB: clay_promotion
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5443:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-promotion-data:/var/lib/postgresql/data
+
+  redis-promotion:
+    image: redis:7-alpine
+    container_name: clay-redis-promotion
+    ports:
+      - "6383:6379"
+    networks: [clay-net]
+
+  clay-promotion-service:
+    build:
+      context: ../clay-promotion-service
+      dockerfile: Dockerfile
+    container_name: clay-promotion-service
+    depends_on: [postgres-promotion, redis-promotion]
+    ports:
+      - "8013:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-promotion
+      DB_NAME: clay_promotion
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_ADDR: redis-promotion:6379
+    networks: [clay-net]
+
+  adminer-promotion:
+    image: adminer
+    container_name: clay-adminer-promotion
+    ports:
+      - "9013:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # PUSH SERVICE  (8014)
+  # ─────────────────────────────────────────────────────────────────────────────
+  clay-push-service:
+    build:
+      context: ../clay-push-service
+      dockerfile: Dockerfile
+    container_name: clay-push-service
+    ports:
+      - "8014:8080"
+    environment:
+      PORT: "8080"
+      REDIS_URL: redis-notification:6379
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # RATING SERVICE  (8015)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-rating:
+    image: postgres:16-alpine
+    container_name: clay-postgres-rating
+    environment:
+      POSTGRES_DB: clay_rating
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5445:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-rating-data:/var/lib/postgresql/data
+
+  redis-rating:
+    image: redis:7-alpine
+    container_name: clay-redis-rating
+    ports:
+      - "6385:6379"
+    networks: [clay-net]
+
+  clay-rating-service:
+    build:
+      context: ../clay-rating-service
+      dockerfile: Dockerfile
+    container_name: clay-rating-service
+    depends_on: [postgres-rating, redis-rating]
+    ports:
+      - "8015:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-rating
+      DB_NAME: clay_rating
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_ADDR: redis-rating:6379
+    networks: [clay-net]
+
+  adminer-rating:
+    image: adminer
+    container_name: clay-adminer-rating
+    ports:
+      - "9015:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # RIDE ORDER SERVICE  (8016)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-ride-order:
+    image: postgres:16-alpine
+    container_name: clay-postgres-ride-order
+    environment:
+      POSTGRES_DB: clay_ride_order
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5446:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-ride-order-data:/var/lib/postgresql/data
+
+  redis-ride-order:
+    image: redis:7-alpine
+    container_name: clay-redis-ride-order
+    ports:
+      - "6386:6379"
+    networks: [clay-net]
+
+  clay-ride-order-service:
+    build:
+      context: ../clay-ride-order-service
+      dockerfile: Dockerfile
+    container_name: clay-ride-order-service
+    depends_on: [postgres-ride-order, redis-ride-order, kafka]
+    ports:
+      - "8016:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-ride-order
+      DB_NAME: clay_ride_order
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_ADDR: redis-ride-order:6379
+      KAFKA_BROKERS: kafka:9092
+    networks: [clay-net]
+
+  adminer-ride-order:
+    image: adminer
+    container_name: clay-adminer-ride-order
+    ports:
+      - "9016:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # FOOD ORDER SERVICE  (8017)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-food-order:
+    image: postgres:16-alpine
+    container_name: clay-postgres-food-order
+    environment:
+      POSTGRES_DB: clay_food_order
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5447:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-food-order-data:/var/lib/postgresql/data
+
+  redis-food-order:
+    image: redis:7-alpine
+    container_name: clay-redis-food-order
+    ports:
+      - "6387:6379"
+    networks: [clay-net]
+
+  mongo-food-order:
+    image: mongo:7
+    container_name: clay-mongo-food-order
+    ports:
+      - "27021:27017"
+    networks: [clay-net]
+    volumes:
+      - mongo-food-order-data:/data/db
+
+  clay-food-order-service:
+    build:
+      context: ../clay-food-order-service
+      dockerfile: Dockerfile
+    container_name: clay-food-order-service
+    depends_on: [postgres-food-order, redis-food-order, mongo-food-order, kafka]
+    ports:
+      - "8017:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-food-order
+      DB_NAME: clay_food_order
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_ADDR: redis-food-order:6379
+      MONGO_URI: mongodb://mongo-food-order:27017
+      MONGO_DB: clay_food_order
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP: clay-food-order-service
+    networks: [clay-net]
+
+  adminer-food-order:
+    image: adminer
+    container_name: clay-adminer-food-order
+    ports:
+      - "9017:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # DELIVERY ORDER SERVICE  (8018)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-delivery-order:
+    image: postgres:16-alpine
+    container_name: clay-postgres-delivery-order
+    environment:
+      POSTGRES_DB: clay_delivery_order
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5448:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-delivery-order-data:/var/lib/postgresql/data
+
+  redis-delivery-order:
+    image: redis:7-alpine
+    container_name: clay-redis-delivery-order
+    ports:
+      - "6388:6379"
+    networks: [clay-net]
+
+  clay-delivery-order-service:
+    build:
+      context: ../clay-delivery-order-service
+      dockerfile: Dockerfile
+    container_name: clay-delivery-order-service
+    depends_on: [postgres-delivery-order, redis-delivery-order, kafka]
+    ports:
+      - "8018:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-delivery-order
+      DB_NAME: clay_delivery_order
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_ADDR: redis-delivery-order:6379
+      KAFKA_BROKERS: kafka:9092
+    networks: [clay-net]
+
+  adminer-delivery-order:
+    image: adminer
+    container_name: clay-adminer-delivery-order
+    ports:
+      - "9018:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # SEARCH SERVICE  (8019)
+  # ─────────────────────────────────────────────────────────────────────────────
+  redis-search:
+    image: redis:7-alpine
+    container_name: clay-redis-search
+    ports:
+      - "6389:6379"
+    networks: [clay-net]
+
+  clay-search-service:
+    build:
+      context: ../clay-search-service
+      dockerfile: Dockerfile
+    container_name: clay-search-service
+    depends_on: [elasticsearch, redis-search, kafka]
+    ports:
+      - "8019:8080"
+    environment:
+      PORT: "8080"
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      REDIS_ADDR: redis-search:6379
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP: clay-search-service
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # SECURITY SERVICE  (8020)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-security:
+    image: postgres:16-alpine
+    container_name: clay-postgres-security
+    environment:
+      POSTGRES_DB: clay_security
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5450:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-security-data:/var/lib/postgresql/data
+
+  redis-security:
+    image: redis:7-alpine
+    container_name: clay-redis-security
+    ports:
+      - "6390:6379"
+    networks: [clay-net]
+
+  clay-security-service:
+    build:
+      context: ../clay-security-service
+      dockerfile: Dockerfile
+    container_name: clay-security-service
+    depends_on: [postgres-security, redis-security, kafka]
+    ports:
+      - "8020:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-security
+      DB_NAME: clay_security
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_ADDR: redis-security:6379
+      KAFKA_BROKERS: kafka:9092
+    networks: [clay-net]
+
+  adminer-security:
+    image: adminer
+    container_name: clay-adminer-security
+    ports:
+      - "9020:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # SMS SERVICE  (8021)
+  # ─────────────────────────────────────────────────────────────────────────────
+  redis-sms:
+    image: redis:7-alpine
+    container_name: clay-redis-sms
+    ports:
+      - "6391:6379"
+    networks: [clay-net]
+
+  clay-sms-service:
+    build:
+      context: ../clay-sms-service
+      dockerfile: Dockerfile
+    container_name: clay-sms-service
+    depends_on: [redis-sms, kafka]
+    ports:
+      - "8021:8080"
+    environment:
+      PORT: "8080"
+      REDIS_ADDR: redis-sms:6379
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP: clay-sms-service
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # WALLET SERVICE  (8022)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-wallet:
+    image: postgres:16-alpine
+    container_name: clay-postgres-wallet
+    environment:
+      POSTGRES_DB: clay_wallet
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5452:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-wallet-data:/var/lib/postgresql/data
+
+  redis-wallet:
+    image: redis:7-alpine
+    container_name: clay-redis-wallet
+    ports:
+      - "6392:6379"
+    networks: [clay-net]
+
+  clay-wallet-service:
+    build:
+      context: ../clay-wallet-service
+      dockerfile: Dockerfile
+    container_name: clay-wallet-service
+    depends_on: [postgres-wallet, redis-wallet, kafka]
+    ports:
+      - "8022:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-wallet
+      DB_NAME: clay_wallet
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_ADDR: redis-wallet:6379
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP: clay-wallet-service
+    networks: [clay-net]
+
+  adminer-wallet:
+    image: adminer
+    container_name: clay-adminer-wallet
+    ports:
+      - "9022:8080"
+    networks: [clay-net]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # HISTORY SERVICE  (8023)
+  # ─────────────────────────────────────────────────────────────────────────────
+  postgres-history:
+    image: postgres:16-alpine
+    container_name: clay-postgres-history
+    environment:
+      POSTGRES_DB: clay_history
+      POSTGRES_USER: clay
+      POSTGRES_PASSWORD: clay
+    ports:
+      - "5453:5432"
+    networks: [clay-net]
+    volumes:
+      - postgres-history-data:/var/lib/postgresql/data
+
+  redis-history:
+    image: redis:7-alpine
+    container_name: clay-redis-history
+    ports:
+      - "6393:6379"
+    networks: [clay-net]
+
+  clay-history-service:
+    build:
+      context: ../clay-history-service
+      dockerfile: Dockerfile
+    container_name: clay-history-service
+    depends_on: [postgres-history, redis-history, kafka]
+    ports:
+      - "8023:8080"
+    environment:
+      PORT: "8080"
+      DB_HOST: postgres-history
+      DB_NAME: clay_history
+      DB_USER: clay
+      DB_PASSWORD: clay
+      REDIS_ADDR: redis-history:6379
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_GROUP: clay-history-service
+    networks: [clay-net]
+
+  adminer-history:
+    image: adminer
+    container_name: clay-adminer-history
+    ports:
+      - "9023:8080"
+    networks: [clay-net]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VOLUMES
+# ─────────────────────────────────────────────────────────────────────────────
+volumes:
+  postgres-auth-data:
+  postgres-user-data:
+  postgres-payment-data:
+  postgres-notification-data:
+  postgres-geo-data:
+  postgres-merchant-data:
+  postgres-pricing-data:
+  postgres-promotion-data:
+  postgres-rating-data:
+  postgres-ride-order-data:
+  postgres-food-order-data:
+  postgres-delivery-order-data:
+  postgres-security-data:
+  postgres-wallet-data:
+  postgres-history-data:
+  mongo-chat-data:
+  mongo-audit-data:
+  mongo-tracking-data:
+  mongo-merchant-data:
+  mongo-food-order-data:

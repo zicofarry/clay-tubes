@@ -1,0 +1,863 @@
+openapi: "3.0.3"
+info:
+  title: Clay Matching Service
+  version: "1.0.0"
+  description: |
+    Driver-to-order matching & dispatch engine for Clay superapp.
+
+    ## Responsibilities
+    - Manages driver online/offline lifecycle with heartbeat TTL
+    - Receives dispatch requests from order services (Ride, Delivery, Food)
+    - Queries Geo Service for nearby available drivers
+    - Scores & ranks candidates using multi-factor algorithm
+    - Broadcasts order offers to candidate drivers via push notification
+    - Handles driver accept/reject with timeout and retry logic
+    - Supports **Multi-Mode** dispatch: Priority (Auto-Bid) vs Normal
+    - Tracks driver daily earnings for priority mode target
+    - Provides zone-level supply/demand stats for surge pricing
+
+    ## Multi-Mode Dispatch
+    ### Priority Mode (Auto-Bid)
+    - Driver sets daily earning target (e.g., Rp 200.000)
+    - System **guarantees** orders by giving priority in matching queue
+    - Fare per trip may be **discounted** (driver accepts lower margin for volume)
+    - Driver appears first in candidate list regardless of distance (within radius)
+    - Mode auto-disables when daily target is reached
+
+    ### Normal Mode (default)
+    - Standard matching — driver receives orders based on scoring algorithm
+    - Full fare pricing, no discount
+    - No volume guarantee
+
+    ## Scoring Algorithm
+    Candidates are ranked by weighted score:
+    ```
+    score = (w1 × proximity) + (w2 × rating) + (w3 × acceptance_rate)
+            + (w4 × mode_bonus) + (w5 × distribution_factor)
+    ```
+    | Factor              | Weight | Description                                    |
+    |---------------------|--------|------------------------------------------------|
+    | `proximity`         | 0.35   | Closer = higher score (inverse distance)       |
+    | `rating`            | 0.20   | Driver star rating (1-5 normalized)            |
+    | `acceptance_rate`   | 0.15   | Historical accept ratio (0-1)                  |
+    | `mode_bonus`        | 0.20   | Priority mode = 1.0, Normal = 0.0              |
+    | `distribution`      | 0.10   | Favors drivers with fewer trips today (fairness)|
+
+    ## Match Flow
+    1. Order service publishes event → Matching consumes
+    2. Query Geo Service for drivers within radius (default 5 km)
+    3. Filter: online, not busy, correct service_type
+    4. Score & rank candidates using algorithm above
+    5. Send offer to #1 candidate; await response (15s timeout)
+    6. If rejected/timeout → next candidate; max 5 rounds
+    7. Match found → emit `matching.driver_found`
+    8. No match → emit `matching.driver_not_found`
+
+    ## Storage
+    - **Redis**:
+      - `driver:status:{driver_id}` (String, TTL 60s) — online/offline/busy
+      - `driver:mode:{driver_id}` (Hash) — dispatch mode + daily target
+      - `driver:earnings:{driver_id}:{date}` (String) — daily earnings counter
+      - `driver:active_order:{driver_id}` (String) — prevents double-assignment
+      - `matching:session:{order_id}` (Hash, TTL 10 min) — active matching state
+      - `zone:stats:{zone_id}` (Hash, TTL 5 min) — supply/demand cache
+
+    ## Kafka Events
+    ### Consumed
+    - `order.ride.created` → trigger ride matching
+    - `order.food.confirmed` → trigger food matching (after merchant confirms)
+    - `order.delivery.created` → trigger delivery matching
+    - `order.completed` / `order.cancelled` → free driver, update earnings
+
+    ### Produced
+    - `matching.driver_found` → consumed by order service to assign driver
+    - `matching.driver_not_found` → consumed by order service to cancel
+    - `matching.offer_sent` → for tracking/audit
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://clay-matching-service:8080
+    description: Internal service
+
+tags:
+  - name: Dispatcher
+    description: Driver-facing dispatch management
+  - name: Internal
+    description: Service-to-service endpoints
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Dispatcher (Driver-facing) ─────────────────────────────────────────────
+
+  /dispatcher/go-online:
+    post:
+      summary: Driver goes online, starts receiving orders
+      operationId: driverGoOnline
+      tags: [Dispatcher]
+      description: |
+        Sets driver status to `online` in Redis with 60s TTL.
+        Driver must call `/dispatcher/heartbeat` every 30s to stay online.
+        Also registers driver location in Geo Service.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [service_type, lat, lng]
+              properties:
+                service_type:
+                  $ref: "#/components/schemas/ServiceType"
+                lat:
+                  type: number
+                  format: double
+                lng:
+                  type: number
+                  format: double
+      responses:
+        "200":
+          description: Driver is now online
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriverStatusResponse"
+        "409":
+          description: Driver already has an active order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /dispatcher/go-offline:
+    post:
+      summary: Driver goes offline, stops receiving orders
+      operationId: driverGoOffline
+      tags: [Dispatcher]
+      description: Removes driver from Redis status and Geo Service index.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Driver is now offline
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriverStatusResponse"
+
+  /dispatcher/location:
+    put:
+      summary: Update driver GPS location in real-time
+      operationId: updateDispatcherLocation
+      tags: [Dispatcher]
+      description: |
+        Called by driver app every ~5 seconds while online.
+        Proxies to Geo Service `PUT /drivers/{id}/location`.
+        Also refreshes heartbeat TTL.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lat, lng]
+              properties:
+                lat:
+                  type: number
+                  format: double
+                lng:
+                  type: number
+                  format: double
+                bearing:
+                  type: number
+                  format: double
+                speed_kmh:
+                  type: number
+                  format: double
+      responses:
+        "200":
+          description: Location updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /dispatcher/heartbeat:
+    post:
+      summary: Heartbeat to keep driver status alive
+      operationId: dispatcherHeartbeat
+      tags: [Dispatcher]
+      description: |
+        Must be called every 30s while online.
+        Resets TTL on `driver:status:{driver_id}` (60s).
+        If missed, driver auto-transitions to offline.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Heartbeat acknowledged
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HeartbeatResponse"
+        "404":
+          description: Driver not online
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /dispatcher/respond:
+    post:
+      summary: Driver accepts or rejects a broadcast order
+      operationId: dispatcherRespond
+      tags: [Dispatcher]
+      description: |
+        Driver responds to an incoming order offer within 15s timeout.
+        - `accept` → driver is locked to order, order service notified
+        - `reject` → matching engine moves to next candidate
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OfferResponseRequest"
+      responses:
+        "200":
+          description: Response recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "404":
+          description: Offer not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Offer already responded to
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /dispatcher/mode:
+    put:
+      summary: Set driver dispatch mode (priority or normal)
+      operationId: setDispatchMode
+      tags: [Dispatcher]
+      description: |
+        **Priority Mode (Auto-Bid):**
+        - Driver sets a daily earning target (e.g., Rp 200.000)
+        - System guarantees order volume by boosting driver in scoring
+        - Fare per trip may be discounted (lower margin, higher volume)
+        - Auto-disables when target reached or driver goes offline
+
+        **Normal Mode (default):**
+        - Standard matching, full fare, no volume guarantee
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetDispatchModeRequest"
+      responses:
+        "200":
+          description: Mode updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DispatchModeResponse"
+        "400":
+          description: Invalid target amount or driver not online
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /dispatcher/status:
+    get:
+      summary: Get full driver dispatch status
+      operationId: getDispatcherStatus
+      tags: [Dispatcher]
+      description: |
+        Returns comprehensive driver status including:
+        online/offline state, current dispatch mode, today's earnings,
+        acceptance rate, and active order info if any.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Full driver dispatch status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FullDriverStatusResponse"
+
+  /dispatcher/earnings/today:
+    get:
+      summary: Get today's earnings progress
+      operationId: getTodayEarnings
+      tags: [Dispatcher]
+      description: |
+        Returns today's total earnings, trip count, and progress
+        toward priority mode target (if active).
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Today's earnings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EarningsTodayResponse"
+
+  # ── Internal (Service-to-Service) ──────────────────────────────────────────
+
+  /internal/dispatcher/dispatch:
+    post:
+      summary: Start matching for a new order
+      operationId: startDispatch
+      tags: [Internal]
+      description: |
+        Called by order services to find a driver for a new order.
+        Non-blocking — matching runs asynchronously.
+        Caller is notified via Kafka `matching.driver_found` or `matching.driver_not_found`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DispatchRequest"
+      responses:
+        "202":
+          description: Dispatch started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DispatchSessionResponse"
+        "409":
+          description: Active dispatch already exists for this order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/dispatcher/cancel:
+    post:
+      summary: Cancel an active dispatch session
+      operationId: cancelDispatch
+      tags: [Internal]
+      description: |
+        Called when order is cancelled before driver is found.
+        Cleans up matching session and frees any held drivers.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_id]
+              properties:
+                order_id:
+                  type: string
+                  format: uuid
+                reason:
+                  type: string
+                  enum: [order_cancelled, timeout, system]
+      responses:
+        "200":
+          description: Dispatch cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "404":
+          description: No active dispatch for this order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/dispatcher/nearby-drivers:
+    get:
+      summary: Find active drivers within radius
+      operationId: getNearbyActiveDrivers
+      tags: [Internal]
+      description: |
+        Combines Redis status check + Geo Service proximity query.
+        Returns only drivers that are online and not busy.
+      parameters:
+        - name: lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: lng
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: radius_km
+          in: query
+          schema:
+            type: number
+            format: double
+            default: 5.0
+        - name: service_type
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/ServiceType"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+      responses:
+        "200":
+          description: Nearby active drivers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NearbyDriversResponse"
+
+  /internal/dispatcher/order/{orderId}/status:
+    get:
+      summary: Get dispatch status for a specific order
+      operationId: getOrderDispatchStatus
+      tags: [Internal]
+      description: Returns the current matching session state for an order.
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Dispatch session status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DispatchSessionDetail"
+        "404":
+          description: No dispatch session found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/dispatcher/zone/{zoneId}/stats:
+    get:
+      summary: Get zone supply/demand stats
+      operationId: getZoneStats
+      tags: [Internal]
+      description: |
+        Returns real-time supply (online drivers) and demand (pending orders)
+        for a zone. Used by Pricing Service for surge multiplier calculation.
+      parameters:
+        - name: zoneId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Zone stats
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ZoneStatsResponse"
+
+  /internal/drivers/{driverId}/free:
+    put:
+      summary: Mark driver as free (trip completed)
+      operationId: freeDriver
+      tags: [Internal]
+      description: |
+        Called by order services when a trip is completed or cancelled after driver assignment.
+        Transitions driver status `busy` → `online` and clears `driver:active_order:{driver_id}`.
+        Also updates daily earnings counter.
+      parameters:
+        - name: driverId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                trip_fare:
+                  type: integer
+                  description: Fare earned from this trip (IDR), added to daily earnings
+                  example: 25000
+      responses:
+        "200":
+          description: Driver freed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+components:
+  schemas:
+    ServiceType:
+      type: string
+      enum: [ride, delivery, food]
+
+    DispatchMode:
+      type: string
+      enum: [priority, normal]
+      description: |
+        - `priority` (Auto-Bid): guaranteed orders, discounted fare, daily target
+        - `normal`: standard matching, full fare
+
+    DriverAvailabilityStatus:
+      type: string
+      enum: [online, offline, busy]
+
+    DispatchRequest:
+      type: object
+      required: [order_id, service_type, pickup_lat, pickup_lng]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        service_type:
+          $ref: "#/components/schemas/ServiceType"
+        pickup_lat:
+          type: number
+          format: double
+        pickup_lng:
+          type: number
+          format: double
+        dest_lat:
+          type: number
+          format: double
+        dest_lng:
+          type: number
+          format: double
+        search_radius_km:
+          type: number
+          format: double
+          default: 5.0
+        max_rounds:
+          type: integer
+          default: 5
+          description: Max candidate rounds before declaring no_driver
+        callback_url:
+          type: string
+          format: uri
+          description: Optional webhook URL for driver assignment callback
+
+    DispatchSessionResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/MatchStatus"
+        created_at:
+          type: string
+          format: date-time
+
+    DispatchSessionDetail:
+      allOf:
+        - $ref: "#/components/schemas/DispatchSessionResponse"
+        - type: object
+          properties:
+            service_type:
+              $ref: "#/components/schemas/ServiceType"
+            candidates_tried:
+              type: integer
+            current_candidate_id:
+              type: string
+              format: uuid
+              nullable: true
+            offer_expires_at:
+              type: string
+              format: date-time
+              nullable: true
+            matched_driver_id:
+              type: string
+              format: uuid
+              nullable: true
+            matched_at:
+              type: string
+              format: date-time
+              nullable: true
+
+    OfferResponseRequest:
+      type: object
+      required: [order_id, action]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        action:
+          type: string
+          enum: [accept, reject]
+        reject_reason:
+          type: string
+          enum: [too_far, busy, low_fare, other]
+
+    SetDispatchModeRequest:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          $ref: "#/components/schemas/DispatchMode"
+        daily_target:
+          type: integer
+          description: Required for priority mode. Daily earning target in IDR.
+          example: 200000
+
+    DispatchModeResponse:
+      type: object
+      properties:
+        mode:
+          $ref: "#/components/schemas/DispatchMode"
+        daily_target:
+          type: integer
+          nullable: true
+          example: 200000
+        earnings_today:
+          type: integer
+          description: Current earnings toward target (IDR)
+          example: 85000
+        target_progress_pct:
+          type: number
+          format: double
+          description: 0.0–1.0 progress toward daily target
+          example: 0.425
+        activated_at:
+          type: string
+          format: date-time
+
+    DriverStatusResponse:
+      type: object
+      properties:
+        driver_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/DriverAvailabilityStatus"
+        updated_at:
+          type: string
+          format: date-time
+
+    FullDriverStatusResponse:
+      type: object
+      properties:
+        driver_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/DriverAvailabilityStatus"
+        mode:
+          $ref: "#/components/schemas/DispatchMode"
+        daily_target:
+          type: integer
+          nullable: true
+        earnings_today:
+          type: integer
+        trips_today:
+          type: integer
+        acceptance_rate:
+          type: number
+          format: double
+          description: Historical accept ratio (0.0–1.0)
+        rating:
+          type: number
+          format: double
+        active_order_id:
+          type: string
+          format: uuid
+          nullable: true
+        online_since:
+          type: string
+          format: date-time
+          nullable: true
+
+    HeartbeatResponse:
+      type: object
+      properties:
+        driver_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/DriverAvailabilityStatus"
+        ttl_seconds:
+          type: integer
+          description: Seconds until auto-offline if no heartbeat
+
+    EarningsTodayResponse:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+        total_earnings:
+          type: integer
+          description: Total IDR earned today
+          example: 185000
+        trip_count:
+          type: integer
+          example: 12
+        mode:
+          $ref: "#/components/schemas/DispatchMode"
+        daily_target:
+          type: integer
+          nullable: true
+          example: 200000
+        target_progress_pct:
+          type: number
+          format: double
+          nullable: true
+          example: 0.925
+        target_remaining:
+          type: integer
+          nullable: true
+          description: IDR remaining to hit target
+          example: 15000
+        avg_fare:
+          type: integer
+          description: Average fare per trip today
+          example: 15417
+
+    NearbyDriversResponse:
+      type: object
+      properties:
+        drivers:
+          type: array
+          items:
+            $ref: "#/components/schemas/NearbyDriverSummary"
+        total:
+          type: integer
+
+    NearbyDriverSummary:
+      type: object
+      properties:
+        driver_id:
+          type: string
+          format: uuid
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        distance_km:
+          type: number
+          format: double
+        rating:
+          type: number
+          format: double
+        acceptance_rate:
+          type: number
+          format: double
+        mode:
+          $ref: "#/components/schemas/DispatchMode"
+        score:
+          type: number
+          format: double
+          description: Computed matching score
+
+    ZoneStatsResponse:
+      type: object
+      properties:
+        zone_id:
+          type: string
+          format: uuid
+        online_drivers:
+          type: integer
+          description: Number of online drivers in zone
+        pending_orders:
+          type: integer
+          description: Number of unmatched orders in zone
+        supply_demand_ratio:
+          type: number
+          format: double
+          description: "> 1.0 = surplus drivers, < 1.0 = shortage"
+          example: 0.65
+        suggested_surge:
+          type: number
+          format: double
+          description: Suggested surge multiplier based on ratio
+          example: 1.5
+        updated_at:
+          type: string
+          format: date-time
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+
+    MatchStatus:
+      type: string
+      enum: [searching, driver_found, no_driver, cancelled]
+      description: Current state of a matching/dispatch session
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

@@ -1,0 +1,1123 @@
+openapi: "3.0.3"
+info:
+  title: Clay Payment Service
+  version: "1.0.0"
+  description: |
+    Payment processing service for Clay superapp.
+
+    ## Responsibilities
+    - Manages payment method registration (cards, bank accounts, e-wallets)
+    - Processes payment charges for orders (integrates with payment gateway)
+    - Handles refund processing for cancelled orders
+    - Maintains transaction history per user
+    - Integrates with Clay Wallet Service for in-app wallet payments
+    - Supports split payment (wallet + card/bank)
+    - **COD Verification** — anti-fraud system for Cash on Delivery orders
+
+    ## Supported Payment Methods
+    - **Clay Wallet** (in-app balance) — instant deduction via Wallet Service
+    - **Credit/Debit Card** — tokenized via payment gateway (Midtrans/Xendit)
+    - **Bank Transfer (VA)** — virtual account generation
+    - **GoPay/OVO/DANA** — redirect flow via e-wallet gateway
+
+    ## Payment Flow
+    1. Order service calls `POST /internal/charges` with order_id and amount
+    2. Payment Service deducts from wallet or initiates gateway transaction
+    3. On success → emits `payment.charged` Kafka event → order service proceeds
+    4. On failure → emits `payment.failed` Kafka event → order cancelled, balance restored
+
+    ## Refund Flow
+    1. Order service calls `POST /internal/refunds` after cancellation
+    2. If original payment was wallet → credit back to wallet
+    3. If card/bank/e-wallet → initiate gateway refund (async, T+1–3)
+
+    ## Hold-Capture Pattern (preferred for orders)
+    For orders that have an uncertain final amount (e.g., metered rides):
+    1. `POST /internal/payments/hold` — Hold (authorize) user's balance when order is created
+    2. `POST /internal/payments/capture` — Capture the held amount when trip is completed
+    3. `POST /internal/payments/release` — Release (void) the hold if order is cancelled
+
+    For fixed-price orders (food, delivery), the system can skip hold and use direct charge.
+
+    ## Settlement Flow
+    After trip completion, the system creates a settlement record:
+    1. `POST /internal/settlements/create` — Deducts platform commission and credits driver wallet
+    2. Settlement details: gross fare, platform fee, driver payout, tax
+
+    ## Storage
+    - **PostgreSQL**: payment_methods, transactions, refunds tables
+    - **Redis**: `payment:idempotency:{idempotency_key}` (TTL 24h) — prevent duplicate charges
+
+    ## Kafka Events
+    ### Produced
+    - `payment.charged` → consumed by order service to proceed
+    - `payment.failed` → consumed by order service to cancel
+    - `payment.refunded` → consumed by order service / notification
+    - `payment.held` → consumed by order service (hold confirmed)
+    - `payment.captured` → consumed by order service (capture confirmed)
+    - `payment.released` → consumed by order service (hold voided)
+    - `settlement.created` → consumed by Wallet Service (credit driver)
+
+    ## COD Verification Flow
+    COD is **locked by default** for GoFood and GoSend. To unlock:
+    1. User enters recipient phone number
+    2. System checks if recipient has a Clay account (via User Service)
+    3. **Case A — Recipient has Clay app:**
+       Push notification to recipient → "Accept" or "Reject" → COD unlocked on Accept
+    4. **Case B — Recipient has no Clay account:**
+       OTP sent to recipient's WhatsApp → Recipient gives OTP to sender → Sender inputs OTP → COD unlocked
+    5. Verification expires after 10 minutes
+
+servers:
+  - url: http://clay-payment-service:8080
+    description: Payment service
+
+tags:
+  - name: Payment Method
+    description: User payment method management
+  - name: COD Verification
+    description: Cash on Delivery anti-fraud verification flow
+  - name: Transaction
+    description: Payment transaction history
+  - name: Internal
+    description: Service-to-service charge, hold, and refund endpoints
+  - name: Settlement
+    description: Driver payout settlement (internal)
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Payment Methods ───────────────────────────────────────────────────────
+
+  /payment-methods:
+    get:
+      summary: List user's saved payment methods
+      operationId: listPaymentMethods
+      tags: [Payment Method]
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: List of payment methods
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentMethodsResponse"
+    post:
+      summary: Add a new payment method
+      operationId: addPaymentMethod
+      tags: [Payment Method]
+      description: |
+        Tokenizes and stores a new payment method.
+        For cards: returns a redirect URL to complete tokenization on the payment gateway.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddPaymentMethodRequest"
+      responses:
+        "201":
+          description: Payment method added
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PaymentMethod"
+        "422":
+          description: Invalid payment method data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /payment-methods/{methodId}:
+    delete:
+      summary: Remove a saved payment method
+      operationId: deletePaymentMethod
+      tags: [Payment Method]
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: methodId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Payment method removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "404":
+          description: Payment method not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /payment-methods/{methodId}/set-default:
+    post:
+      summary: Set a payment method as default
+      operationId: setDefaultPaymentMethod
+      tags: [Payment Method]
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: methodId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Default method updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  # ── COD Verification ─────────────────────────────────────────────────────
+
+  /cod/verify/initiate:
+    post:
+      summary: Initiate COD verification with recipient
+      operationId: initiateCodVerification
+      tags: [COD Verification]
+      description: |
+        **Step 1** of COD unlock flow. User provides recipient's phone number.
+
+        The system will:
+        1. Call User Service to check if recipient has a Clay account
+        2. If yes → send push notification to recipient app (accept/reject)
+        3. If no → send OTP to recipient's WhatsApp
+
+        Returns a `verification_id` and `verification_type` (`push_confirmation` or `whatsapp_otp`).
+        The client then either:
+        - Polls `GET /cod/verify/{verificationId}/status` (for push_confirmation)
+        - Calls `POST /cod/verify/{verificationId}/otp` with the OTP (for whatsapp_otp)
+
+        **Expiration:** Verification expires after 10 minutes.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CodVerifyInitiateRequest"
+      responses:
+        "201":
+          description: Verification initiated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodVerifyInitiateResponse"
+        "400":
+          description: Invalid phone number format
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many verification attempts (max 3 per hour)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cod/verify/{verificationId}/status:
+    get:
+      summary: Check COD verification status
+      operationId: getCodVerificationStatus
+      tags: [COD Verification]
+      description: |
+        Poll this endpoint to check if the recipient has accepted/rejected
+        the COD request (for `push_confirmation` type). Also works for
+        `whatsapp_otp` type to check if OTP has been verified.
+
+        **Recommended polling interval:** every 3 seconds, max 10 minutes.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: verificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Current verification status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodVerifyStatusResponse"
+        "404":
+          description: Verification not found or expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cod/verify/{verificationId}/otp:
+    post:
+      summary: Submit OTP for COD verification (Case B)
+      operationId: submitCodVerificationOtp
+      tags: [COD Verification]
+      description: |
+        **For Case B only** (recipient has no Clay account).
+        The recipient receives an OTP via WhatsApp, tells it to the sender,
+        and the sender inputs it here.
+
+        Max 3 attempts. After 3 failures, verification is locked and must be re-initiated.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: verificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [otp_code]
+              properties:
+                otp_code:
+                  type: string
+                  minLength: 6
+                  maxLength: 6
+                  example: "483921"
+      responses:
+        "200":
+          description: OTP verified — COD unlocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodVerifyStatusResponse"
+        "400":
+          description: Invalid OTP code
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "410":
+          description: Verification expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Max OTP attempts exceeded — re-initiate required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /cod/verify/{verificationId}/respond:
+    post:
+      summary: Recipient responds to COD push notification (Case A)
+      operationId: respondCodVerification
+      tags: [COD Verification]
+      description: |
+        **For Case A only** (recipient has Clay account).
+        Called by the **recipient's** app when they tap Accept or Reject
+        on the COD confirmation push notification.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: verificationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [accept, reject]
+                  example: accept
+      responses:
+        "200":
+          description: Response recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CodVerifyStatusResponse"
+        "403":
+          description: Only the recipient can respond
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "410":
+          description: Verification expired
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Transactions ──────────────────────────────────────────────────────────
+
+  /transactions:
+    get:
+      summary: Get payment transaction history
+      operationId: getTransactionHistory
+      tags: [Transaction]
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+        - name: type
+          in: query
+          schema:
+            $ref: "#/components/schemas/TransactionType"
+      responses:
+        "200":
+          description: Transaction history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionHistoryResponse"
+
+  /transactions/{transactionId}:
+    get:
+      summary: Get transaction detail
+      operationId: getTransactionDetail
+      tags: [Transaction]
+      parameters:
+        - name: transactionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Transaction detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transaction"
+        "404":
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Internal ──────────────────────────────────────────────────────────────
+
+  /internal/charges:
+    post:
+      summary: Charge a user for an order
+      operationId: createCharge
+      tags: [Internal]
+      description: |
+        Idempotent — use `Idempotency-Key` header to prevent duplicate charges.
+        Deducts from wallet or initiates gateway flow based on payment_method_type.
+        Responds synchronously for wallet payments; async (Kafka) for gateway payments.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChargeRequest"
+      responses:
+        "200":
+          description: Charge completed (wallet payment)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChargeResponse"
+        "202":
+          description: Charge initiated (gateway payment, result via Kafka)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChargeResponse"
+        "402":
+          description: Insufficient balance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Invalid payment method or amount
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/refunds:
+    post:
+      summary: Initiate a refund for an order
+      operationId: createRefund
+      tags: [Internal]
+      description: |
+        Called by order services on cancellation.
+        Wallet refunds are instant; gateway refunds are async (T+1–3 business days).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RefundRequest"
+      responses:
+        "200":
+          description: Refund initiated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefundResponse"
+        "404":
+          description: Original transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/transactions/{transactionId}/status:
+    get:
+      summary: Get transaction status (for gateway payment polling)
+      operationId: getTransactionStatus
+      tags: [Internal]
+      parameters:
+        - name: transactionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Transaction status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionStatusResponse"
+
+  # ── Hold / Capture / Release ───────────────────────────────────────────
+
+  /internal/payments/hold:
+    post:
+      summary: Hold (authorize) user balance for an order
+      operationId: holdPayment
+      tags: [Internal]
+      description: |
+        Places a hold on the user's wallet or payment method when an order is created.
+        The amount is reserved but not yet deducted.
+        Used for metered rides where final fare is determined at trip end.
+        Idempotent via `Idempotency-Key` header.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HoldRequest"
+      responses:
+        "200":
+          description: Hold placed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HoldResponse"
+        "402":
+          description: Insufficient balance for hold
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/payments/capture:
+    post:
+      summary: Capture a held amount after trip completion
+      operationId: capturePayment
+      tags: [Internal]
+      description: |
+        Converts a hold into an actual charge. The capture amount can be
+        less than or equal to the hold amount (e.g., shorter trip than estimated).
+        Any excess is automatically released.
+        Publishes `payment.captured` Kafka event.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CaptureRequest"
+      responses:
+        "200":
+          description: Payment captured
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaptureResponse"
+        "404":
+          description: Hold not found or already captured/released
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/payments/release:
+    post:
+      summary: Release (void) a held amount on order cancellation
+      operationId: releasePayment
+      tags: [Internal]
+      description: |
+        Releases the held amount back to the user's wallet/payment method.
+        Called when an order is cancelled before trip completion.
+        Publishes `payment.released` Kafka event.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReleaseRequest"
+      responses:
+        "200":
+          description: Hold released
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "404":
+          description: Hold not found or already captured/released
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Settlements ──────────────────────────────────────────────────────
+
+  /internal/settlements/create:
+    post:
+      summary: Create settlement and credit driver wallet
+      operationId: createSettlement
+      tags: [Settlement]
+      description: |
+        Called by order services after trip completion.
+        Calculates platform commission, taxes, and driver payout.
+        Credits the driver's wallet via Wallet Service.
+        Publishes `settlement.created` Kafka event.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSettlementRequest"
+      responses:
+        "201":
+          description: Settlement created, driver credited
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettlementResponse"
+        "409":
+          description: Settlement already exists for this order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  parameters:
+    UserId:
+      name: X-User-ID
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Authenticated user ID (set by API Gateway from JWT)
+
+  schemas:
+    # ── Enums ────────────────────────────────────────────────────────────────
+
+    PaymentMethodType:
+      type: string
+      enum: [clay_wallet, credit_card, debit_card, bank_transfer, gopay, ovo, dana, cod]
+
+    TransactionType:
+      type: string
+      enum: [charge, refund, top_up]
+
+    TransactionStatus:
+      type: string
+      enum: [pending, completed, failed, refunded]
+
+    # ── Payment Methods ───────────────────────────────────────────────────────
+
+    PaymentMethodsResponse:
+      type: object
+      properties:
+        methods:
+          type: array
+          items:
+            $ref: "#/components/schemas/PaymentMethod"
+        default_method_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    PaymentMethod:
+      type: object
+      properties:
+        method_id:
+          type: string
+          format: uuid
+        type:
+          $ref: "#/components/schemas/PaymentMethodType"
+        display_name:
+          type: string
+          example: "Visa •••• 1234"
+        last_four:
+          type: string
+          nullable: true
+        expiry_month:
+          type: integer
+          nullable: true
+        expiry_year:
+          type: integer
+          nullable: true
+        is_default:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    AddPaymentMethodRequest:
+      type: object
+      required: [type]
+      properties:
+        type:
+          $ref: "#/components/schemas/PaymentMethodType"
+        card_token:
+          type: string
+          description: One-time card token from payment gateway SDK (for card types)
+          nullable: true
+        set_as_default:
+          type: boolean
+          default: false
+
+    # ── Transactions ──────────────────────────────────────────────────────────
+
+    Transaction:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+          nullable: true
+        type:
+          $ref: "#/components/schemas/TransactionType"
+        status:
+          $ref: "#/components/schemas/TransactionStatus"
+        amount:
+          type: integer
+          description: IDR
+        payment_method_type:
+          $ref: "#/components/schemas/PaymentMethodType"
+        description:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TransactionHistoryResponse:
+      type: object
+      properties:
+        transactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Transaction"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    TransactionStatusResponse:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/TransactionStatus"
+        gateway_reference:
+          type: string
+          nullable: true
+
+    # ── Charge / Refund ───────────────────────────────────────────────────────
+
+    ChargeRequest:
+      type: object
+      required: [order_id, user_id, amount, payment_method_id]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          description: Amount in IDR
+        payment_method_id:
+          type: string
+          format: uuid
+        description:
+          type: string
+          example: "ClayRide - Jl. Sudirman → Jl. Gatot Subroto"
+
+    ChargeResponse:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/TransactionStatus"
+        gateway_redirect_url:
+          type: string
+          nullable: true
+          description: Redirect URL for e-wallet/bank transfer payment; null for wallet/card
+
+    RefundRequest:
+      type: object
+      required: [order_id, user_id, amount, reason]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          description: Amount to refund in IDR (may be partial)
+        reason:
+          type: string
+          enum: [user_cancelled, driver_cancelled, system_error, fraud]
+
+    RefundResponse:
+      type: object
+      properties:
+        refund_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [processed, pending]
+          description: |
+            - `processed` for wallet refunds (instant)
+            - `pending` for gateway refunds (async T+1–3)
+        estimated_completion:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ── COD Verification ──────────────────────────────────────────────────────
+
+    CodVerifyInitiateRequest:
+      type: object
+      required: [recipient_phone, order_type]
+      properties:
+        recipient_phone:
+          type: string
+          description: Recipient phone number (with country code)
+          example: "+6281234567890"
+        order_type:
+          type: string
+          enum: [food, delivery]
+          description: COD verification only applies to food and delivery orders
+          example: food
+        order_summary:
+          type: string
+          description: Short description shown in recipient's notification
+          example: "GoFood dari Warung Padang Maju — Rp45.000"
+
+    CodVerifyInitiateResponse:
+      type: object
+      properties:
+        verification_id:
+          type: string
+          format: uuid
+        verification_type:
+          type: string
+          enum: [push_confirmation, whatsapp_otp]
+          description: |
+            - `push_confirmation` — recipient has Clay app, push notification sent
+            - `whatsapp_otp` — recipient has no Clay account, OTP sent to WhatsApp
+        recipient_masked_phone:
+          type: string
+          description: Masked phone for display in sender's UI
+          example: "+62812****7890"
+        recipient_has_clay_account:
+          type: boolean
+        expires_at:
+          type: string
+          format: date-time
+          description: Verification expires at this time (10 min TTL)
+
+    CodVerifyStatusResponse:
+      type: object
+      properties:
+        verification_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, accepted, rejected, verified, expired, failed]
+          description: |
+            - `pending` — waiting for recipient response (Case A) or OTP input (Case B)
+            - `accepted` — recipient accepted via push (Case A) → COD unlocked
+            - `rejected` — recipient rejected via push (Case A) → COD denied
+            - `verified` — OTP verified successfully (Case B) → COD unlocked
+            - `expired` — verification timed out (10 min)
+            - `failed` — max OTP attempts exceeded (Case B)
+        cod_unlocked:
+          type: boolean
+          description: Whether COD payment method is now available for this order
+          example: true
+        cod_token:
+          type: string
+          nullable: true
+          description: |
+            One-time token to use when placing the order with COD.
+            Must be passed in the charge request to prove COD was verified.
+            Expires with the verification.
+          example: "cod_tok_a1b2c3d4e5f6"
+        otp_attempts_remaining:
+          type: integer
+          nullable: true
+          description: Only present for whatsapp_otp type
+          example: 2
+
+    # ── Hold / Capture / Release ──────────────────────────────────────────────
+
+    HoldRequest:
+      type: object
+      required: [order_id, user_id, amount, payment_method_type]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          description: Amount to hold in IDR
+          example: 50000
+        payment_method_type:
+          $ref: "#/components/schemas/PaymentMethodType"
+        payment_method_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Required for card/bank, null for wallet
+
+    HoldResponse:
+      type: object
+      properties:
+        hold_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+        status:
+          type: string
+          enum: [held, failed]
+        expires_at:
+          type: string
+          format: date-time
+          description: Hold auto-releases after this time (default 2h)
+        created_at:
+          type: string
+          format: date-time
+
+    CaptureRequest:
+      type: object
+      required: [hold_id, capture_amount]
+      properties:
+        hold_id:
+          type: string
+          format: uuid
+        capture_amount:
+          type: integer
+          description: |
+            Final amount to charge. Must be <= hold amount.
+            Any excess is auto-released.
+          example: 45000
+
+    CaptureResponse:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        hold_id:
+          type: string
+          format: uuid
+        captured_amount:
+          type: integer
+        released_amount:
+          type: integer
+          description: Excess amount released back to user
+        status:
+          type: string
+          enum: [captured]
+
+    ReleaseRequest:
+      type: object
+      required: [hold_id]
+      properties:
+        hold_id:
+          type: string
+          format: uuid
+        reason:
+          type: string
+          enum: [order_cancelled, timeout, system]
+          example: order_cancelled
+
+    # ── Settlement ─────────────────────────────────────────────────────────────
+
+    CreateSettlementRequest:
+      type: object
+      required: [order_id, driver_id, gross_fare, service_type]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        driver_id:
+          type: string
+          format: uuid
+        gross_fare:
+          type: integer
+          description: Total fare paid by user (IDR)
+          example: 45000
+        service_type:
+          type: string
+          enum: [ride, food, delivery]
+        platform_fee_pct:
+          type: number
+          format: double
+          description: Platform commission percentage (default from config)
+          example: 0.20
+
+    SettlementResponse:
+      type: object
+      properties:
+        settlement_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        driver_id:
+          type: string
+          format: uuid
+        gross_fare:
+          type: integer
+          example: 45000
+        platform_fee:
+          type: integer
+          description: Platform commission deducted
+          example: 9000
+        driver_payout:
+          type: integer
+          description: Amount credited to driver wallet
+          example: 36000
+        status:
+          type: string
+          enum: [settled, pending]
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Common ────────────────────────────────────────────────────────────────
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: INSUFFICIENT_BALANCE
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string

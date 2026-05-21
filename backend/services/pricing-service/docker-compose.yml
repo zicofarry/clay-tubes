@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  postgres-pricing:
+    image: postgres:15-alpine
+    container_name: clay_pricing_postgres
+    environment:
+      POSTGRES_USER: clay_user
+      POSTGRES_PASSWORD: clay_password
+      POSTGRES_DB: pricing_db
+    ports:
+      - "5442:5432"
+    volumes:
+      - postgres_pricing_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U clay_user -d pricing_db" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-pricing:
+    image: redis:7-alpine
+    container_name: clay_pricing_redis
+    ports:
+      - "6382:6379"
+
+  adminer:
+    image: adminer
+    container_name: clay_pricing_adminer
+    restart: always
+    ports:
+      - "9012:8080"
+
+volumes:
+  postgres_pricing_data:

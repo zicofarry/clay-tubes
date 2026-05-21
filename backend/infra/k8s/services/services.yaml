@@ -1,0 +1,1457 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Clay Platform — Kubernetes Service Manifests
+# Each microservice: Deployment + Service
+# Pattern: 1 replica (scale up as needed), ClusterIP service
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── Auth Service ─────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-auth-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-auth-service
+  template:
+    metadata:
+      labels:
+        app: clay-auth-service
+    spec:
+      containers:
+        - name: clay-auth-service
+          image: clay/clay-auth-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-auth
+            - name: DB_NAME
+              value: clay_auth
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: jwt-secret
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-auth-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-auth-service
+
+# ─── User Service ─────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-user-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-user-service
+  template:
+    metadata:
+      labels:
+        app: clay-user-service
+    spec:
+      containers:
+        - name: clay-user-service
+          image: clay/clay-user-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-user
+            - name: DB_NAME
+              value: clay_user
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_HOST
+              value: redis-user
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-user-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-user-service
+
+# ─── Merchant Service ─────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-merchant-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-merchant-service
+  template:
+    metadata:
+      labels:
+        app: clay-merchant-service
+    spec:
+      containers:
+        - name: clay-merchant-service
+          image: clay/clay-merchant-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-merchant
+            - name: DB_NAME
+              value: clay_merchant
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: MONGO_URI
+              value: mongodb://mongo-merchant:27017
+            - name: MONGO_DB
+              value: clay_merchant
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-merchant-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-merchant-service
+
+# ─── Food Order Service ───────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-food-order-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-food-order-service
+  template:
+    metadata:
+      labels:
+        app: clay-food-order-service
+    spec:
+      containers:
+        - name: clay-food-order-service
+          image: clay/clay-food-order-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-food-order
+            - name: DB_NAME
+              value: clay_food_order
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_ADDR
+              value: redis-food-order:6379
+            - name: MONGO_URI
+              value: mongodb://mongo-food-order:27017
+            - name: MONGO_DB
+              value: clay_food_order
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+            - name: KAFKA_GROUP
+              value: clay-food-order-service
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-food-order-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-food-order-service
+
+# ─── Matching Service ─────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-matching-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-matching-service
+  template:
+    metadata:
+      labels:
+        app: clay-matching-service
+    spec:
+      containers:
+        - name: clay-matching-service
+          image: clay/clay-matching-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: REDIS_ADDR
+              value: redis-matching:6379
+            - name: GEO_SERVICE_URL
+              value: http://clay-geo-service:8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-matching-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-matching-service
+
+# ─── Geo Service ──────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-geo-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-geo-service
+  template:
+    metadata:
+      labels:
+        app: clay-geo-service
+    spec:
+      containers:
+        - name: clay-geo-service
+          image: clay/clay-geo-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: REDIS_ADDR
+              value: redis-geo:6379
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+            - name: KAFKA_GROUP
+              value: clay-geo-service
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-geo-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-geo-service
+
+# ─── Payment Service ─────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-payment-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-payment-service
+  template:
+    metadata:
+      labels:
+        app: clay-payment-service
+    spec:
+      containers:
+        - name: clay-payment-service
+          image: clay/clay-payment-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-payment
+            - name: DB_NAME
+              value: clay_payment
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_ADDR
+              value: redis-payment:6379
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-payment-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-payment-service
+
+# ─── Delivery Order Service ──────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-delivery-order-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-delivery-order-service
+  template:
+    metadata:
+      labels:
+        app: clay-delivery-order-service
+    spec:
+      containers:
+        - name: clay-delivery-order-service
+          image: clay/clay-delivery-order-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-delivery-order
+            - name: DB_NAME
+              value: clay_delivery_order
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_ADDR
+              value: redis-delivery-order:6379
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-delivery-order-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-delivery-order-service
+
+# ─── Ride Order Service ──────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-ride-order-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-ride-order-service
+  template:
+    metadata:
+      labels:
+        app: clay-ride-order-service
+    spec:
+      containers:
+        - name: clay-ride-order-service
+          image: clay/clay-ride-order-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-ride-order
+            - name: DB_NAME
+              value: clay_ride_order
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_ADDR
+              value: redis-ride-order:6379
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-ride-order-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-ride-order-service
+
+# ─── Chat Service ────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-chat-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-chat-service
+  template:
+    metadata:
+      labels:
+        app: clay-chat-service
+    spec:
+      containers:
+        - name: clay-chat-service
+          image: clay/clay-chat-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: MONGO_URI
+              value: mongodb://mongo-chat:27017
+            - name: MONGO_DB
+              value: clay_chat
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-chat-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-chat-service
+
+# ─── Notification Service ────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-notification-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-notification-service
+  template:
+    metadata:
+      labels:
+        app: clay-notification-service
+    spec:
+      containers:
+        - name: clay-notification-service
+          image: clay/clay-notification-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-notification
+            - name: DB_NAME
+              value: clay_notification
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-notification-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-notification-service
+
+# ─── Push Service ────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-push-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-push-service
+  template:
+    metadata:
+      labels:
+        app: clay-push-service
+    spec:
+      containers:
+        - name: clay-push-service
+          image: clay/clay-push-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-push-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-push-service
+
+# ─── SMS Service ─────────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-sms-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-sms-service
+  template:
+    metadata:
+      labels:
+        app: clay-sms-service
+    spec:
+      containers:
+        - name: clay-sms-service
+          image: clay/clay-sms-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-sms
+            - name: DB_NAME
+              value: clay_sms
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_ADDR
+              value: redis-sms:6379
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-sms-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-sms-service
+
+# ─── Email Service ───────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-email-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-email-service
+  template:
+    metadata:
+      labels:
+        app: clay-email-service
+    spec:
+      containers:
+        - name: clay-email-service
+          image: clay/clay-email-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-email
+            - name: DB_NAME
+              value: clay_email
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_ADDR
+              value: redis-email:6379
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-email-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-email-service
+
+# ─── Search Service ──────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-search-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-search-service
+  template:
+    metadata:
+      labels:
+        app: clay-search-service
+    spec:
+      containers:
+        - name: clay-search-service
+          image: clay/clay-search-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: REDIS_ADDR
+              value: redis-search:6379
+            - name: ELASTICSEARCH_URL
+              value: http://elasticsearch:9200
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-search-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-search-service
+
+# ─── Rating Service ──────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-rating-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-rating-service
+  template:
+    metadata:
+      labels:
+        app: clay-rating-service
+    spec:
+      containers:
+        - name: clay-rating-service
+          image: clay/clay-rating-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-rating
+            - name: DB_NAME
+              value: clay_rating
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_ADDR
+              value: redis-rating:6379
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-rating-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-rating-service
+
+# ─── Promotion Service ──────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-promotion-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-promotion-service
+  template:
+    metadata:
+      labels:
+        app: clay-promotion-service
+    spec:
+      containers:
+        - name: clay-promotion-service
+          image: clay/clay-promotion-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-promotion
+            - name: DB_NAME
+              value: clay_promotion
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_ADDR
+              value: redis-promotion:6379
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-promotion-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-promotion-service
+
+# ─── Pricing Service ────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-pricing-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-pricing-service
+  template:
+    metadata:
+      labels:
+        app: clay-pricing-service
+    spec:
+      containers:
+        - name: clay-pricing-service
+          image: clay/clay-pricing-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-pricing
+            - name: DB_NAME
+              value: clay_pricing
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_ADDR
+              value: redis-pricing:6379
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-pricing-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-pricing-service
+
+# ─── Wallet Service ─────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-wallet-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-wallet-service
+  template:
+    metadata:
+      labels:
+        app: clay-wallet-service
+    spec:
+      containers:
+        - name: clay-wallet-service
+          image: clay/clay-wallet-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-wallet
+            - name: DB_NAME
+              value: clay_wallet
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_ADDR
+              value: redis-wallet:6379
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-wallet-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-wallet-service
+
+# ─── History Service ─────────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-history-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-history-service
+  template:
+    metadata:
+      labels:
+        app: clay-history-service
+    spec:
+      containers:
+        - name: clay-history-service
+          image: clay/clay-history-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-history
+            - name: DB_NAME
+              value: clay_history
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_ADDR
+              value: redis-history:6379
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-history-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-history-service
+
+# ─── Tracking Service ───────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-tracking-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-tracking-service
+  template:
+    metadata:
+      labels:
+        app: clay-tracking-service
+    spec:
+      containers:
+        - name: clay-tracking-service
+          image: clay/clay-tracking-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: REDIS_ADDR
+              value: redis-tracking:6379
+            - name: MONGO_URI
+              value: mongodb://mongo-tracking:27017
+            - name: MONGO_DB
+              value: clay_tracking
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+            - name: KAFKA_GROUP
+              value: clay-tracking-service
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-tracking-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-tracking-service
+
+# ─── Audit Log Service ──────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-audit-log-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-audit-log-service
+  template:
+    metadata:
+      labels:
+        app: clay-audit-log-service
+    spec:
+      containers:
+        - name: clay-audit-log-service
+          image: clay/clay-audit-log-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: MONGO_URI
+              value: mongodb://mongo-audit:27017
+            - name: MONGO_DB
+              value: clay_audit_log
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+            - name: KAFKA_GROUP
+              value: clay-audit-log-service
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-audit-log-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-audit-log-service
+
+# ─── Security Service ───────────────────────────────────────────────────────
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clay-security-service
+  namespace: clay
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: clay-security-service
+  template:
+    metadata:
+      labels:
+        app: clay-security-service
+    spec:
+      containers:
+        - name: clay-security-service
+          image: clay/clay-security-service:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: DB_HOST
+              value: postgres-security
+            - name: DB_NAME
+              value: clay_security
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-user
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: clay-secrets
+                  key: db-password
+            - name: REDIS_ADDR
+              value: redis-security:6379
+            - name: KAFKA_BROKERS
+              value: kafka:9092
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clay-security-service
+  namespace: clay
+spec:
+  ports:
+    - port: 8080
+  selector:
+    app: clay-security-service

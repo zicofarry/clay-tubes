@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.1
+    container_name: clay_search_es
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "9200:9200"
+
+  redis-search:
+    image: redis:7-alpine
+    container_name: clay_search_redis
+    ports:
+      - "6389:6379"
+  
+  adminer:
+    image: adminer
+    container_name: clay_search_adminer
+    restart: always
+    ports:
+      - "9019:8080"

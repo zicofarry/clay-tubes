@@ -1,0 +1,48 @@
+services:
+  postgres-rating:
+    image: postgres:15-alpine
+    container_name: clay_rating_postgres
+    environment:
+      POSTGRES_USER: clay_user
+      POSTGRES_PASSWORD: clay_password
+      POSTGRES_DB: rating_db
+    ports:
+      - "5445:5432" 
+    volumes:
+      - postgres_rating_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clay_user -d rating_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-rating:
+    image: redis:7-alpine
+    container_name: clay_rating_redis
+    ports:
+      - "6385:6379"
+
+  adminer-rating:
+    image: adminer
+    container_name: clay_rating_adminer
+    restart: always
+    ports:
+      - "9015:8080" 
+    depends_on:
+      - postgres-rating
+
+  rating-service:
+    build: .
+    container_name: clay_rating_service
+    ports:
+      - "8015:8015" 
+    environment:
+      - POSTGRES_DSN=host=postgres-rating user=clay_user password=clay_password dbname=rating_db port=5432 sslmode=disable TimeZone=UTC
+      - REDIS_ADDR=redis-rating:6379
+      - PORT=8015
+    depends_on:
+      - postgres-rating
+      - redis-rating
+
+volumes:
+  postgres_rating_data:

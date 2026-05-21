@@ -1,0 +1,1357 @@
+openapi: 3.0.3
+info:
+  title: Clay User Service API
+  description: |
+    User profile, address, driver profile, driver document, and
+    user settings management for the Clay platform.
+
+    ## Responsibilities
+    - Manage user profiles (name, avatar, demographics)
+    - Manage user addresses (home, work, custom)
+    - Driver onboarding (profile & document upload)
+    - Driver verification workflow (admin)
+    - Manage user preferences & notification settings
+    - Serve fast profile lookups via Redis cache
+
+    ## Storage
+    - **PostgreSQL**: `users`, `addresses`, `driver_profiles`, `driver_documents`, `user_settings`
+    - **Redis**: 
+      - `profile:{user_id}` (TTL 10 min) — user profile read-through cache
+      - `driver:{driver_id}` (TTL 10 min) — driver profile cache
+      - `driver:online` (Set) — tracks online drivers (for Geo Service to index)
+
+    ## Kafka Events
+    ### Consumed
+    - `auth.user_registered` → initializes empty profile record
+
+    ### Produced
+    - `user.profile_updated` → consumed by Audit Log, Order Services
+    - `driver.registered` → consumed by Notification Service (welcome push)
+    - `driver.document_uploaded` → consumed by Admin/Notification Service
+    - `driver.verified` → consumed by Auth Service (updates role/claims)
+    - `driver.status_changed` → consumed by Geo Service (update driver location index)
+  version: 1.0.0
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://localhost:3002/api/v1
+    description: Local development
+  - url: https://api.clay.id/user/v1
+    description: Production (via API Gateway)
+
+tags:
+  - name: Profile
+    description: User profile CRUD
+  - name: Address
+    description: Saved addresses management
+  - name: Driver
+    description: Driver profile & onboarding
+  - name: Document
+    description: Driver document upload & verification
+  - name: Settings
+    description: User preferences & notification settings
+  - name: Internal
+    description: Internal endpoints (called by other services, not exposed to public)
+
+paths:
+  # ─────────────────────────── Profile ───────────────────────────
+  /users/me:
+    get:
+      operationId: getMyProfile
+      tags: [Profile]
+      summary: Get current user's profile
+      description: |
+        Returns the authenticated user's profile.
+        Served from Redis cache if available (TTL 10 min).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Profile not found (user needs to complete onboarding)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      operationId: createProfile
+      tags: [Profile]
+      summary: Create user profile (onboarding)
+      description: |
+        Called once after registration to fill in profile details.
+        Generates a unique referral_code automatically.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateProfileRequest'
+      responses:
+        '201':
+          description: Profile created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Profile already exists for this user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      operationId: updateProfile
+      tags: [Profile]
+      summary: Update user profile
+      description: Invalidates Redis cache on update.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users/{userId}:
+    get:
+      operationId: getProfileByUserId
+      tags: [Profile]
+      summary: Get a user's public profile
+      description: Returns public profile info (name, avatar, rating). Used by other services.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Public profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicProfileResponse'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /users/me/avatar:
+    put:
+      operationId: uploadAvatar
+      tags: [Profile]
+      summary: Upload or update avatar image
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [avatar]
+              properties:
+                avatar:
+                  type: string
+                  format: binary
+                  description: JPEG/PNG, max 2MB
+      responses:
+        '200':
+          description: Avatar updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    properties:
+                      avatar_url:
+                        type: string
+                        format: uri
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '413':
+          description: File too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /users/me/referral/apply:
+    post:
+      operationId: applyReferralCode
+      tags: [Profile]
+      summary: Apply a referral code
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [referral_code]
+              properties:
+                referral_code:
+                  type: string
+                  example: "BUDI2025"
+      responses:
+        '200':
+          description: Referral applied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: Already has a referrer or invalid code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Referral code not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Address ───────────────────────────
+  /addresses:
+    get:
+      operationId: listAddresses
+      tags: [Address]
+      summary: List saved addresses
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of addresses
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddressListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: createAddress
+      tags: [Address]
+      summary: Add a new saved address
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddressRequest'
+      responses:
+        '201':
+          description: Address created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddressResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /addresses/{addressId}:
+    put:
+      operationId: updateAddress
+      tags: [Address]
+      summary: Update a saved address
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: addressId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddressRequest'
+      responses:
+        '200':
+          description: Address updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddressResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Address not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: deleteAddress
+      tags: [Address]
+      summary: Delete a saved address
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: addressId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Address deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Address not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /addresses/{addressId}/default:
+    put:
+      operationId: setDefaultAddress
+      tags: [Address]
+      summary: Set an address as default
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: addressId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Default address updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Address not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Driver Profile ───────────────────────────
+  /drivers/me:
+    get:
+      operationId: getDriverProfile
+      tags: [Driver]
+      summary: Get driver profile for current user
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Driver profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriverProfileResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: User is not a driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Driver profile not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      operationId: updateDriverProfile
+      tags: [Driver]
+      summary: Update driver vehicle info
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateDriverProfileRequest'
+      responses:
+        '200':
+          description: Driver profile updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriverProfileResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /drivers/register:
+    post:
+      operationId: createDriverProfile
+      tags: [Driver]
+      summary: Register as a driver (onboarding)
+      description: |
+        Creates driver profile with vehicle info. Status starts as 'pending'
+        until all required documents are uploaded and verified.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateDriverProfileRequest'
+      responses:
+        '201':
+          description: Driver profile created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriverProfileResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Driver profile already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+
+  /drivers/{driverId}:
+    get:
+      operationId: getDriverProfileById
+      tags: [Driver]
+      summary: Get driver's public profile (inter-service)
+      parameters:
+        - name: driverId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Driver public profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriverPublicProfileResponse'
+        '404':
+          description: Driver not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /drivers/{driverId}/status:
+    put:
+      operationId: toggleDriverOnline
+      tags: [Driver]
+      summary: Toggle driver online/offline status
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: driverId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [is_online]
+              properties:
+                is_online:
+                  type: boolean
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    properties:
+                      is_online:
+                        type: boolean
+                      last_online_at:
+                        type: string
+                        format: date-time
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Driver not verified yet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Driver Documents ───────────────────────────
+  /drivers/me/documents:
+    get:
+      operationId: listDriverDocuments
+      tags: [Document]
+      summary: List all uploaded documents
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of documents
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: uploadDocument
+      tags: [Document]
+      summary: Upload a driver document
+      description: |
+        Upload KTP, SIM, STNK, or selfie for verification.
+        Each document type can only be uploaded once (re-upload replaces existing).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [type, file]
+              properties:
+                type:
+                  type: string
+                  enum: [ktp, sim, stnk, selfie]
+                file:
+                  type: string
+                  format: binary
+                  description: JPEG/PNG, max 5MB
+      responses:
+        '201':
+          description: Document uploaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /drivers/me/documents/{documentId}:
+    get:
+      operationId: getDocument
+      tags: [Document]
+      summary: Get document detail
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Document not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: deleteDocument
+      tags: [Document]
+      summary: Delete a document (only if status = pending)
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Document deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Cannot delete an approved document
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ── Admin-only document verification (internal) ──
+  /drivers/{driverId}/verification:
+    get:
+      operationId: getDriverVerificationStatus
+      tags: [Document]
+      summary: Get driver document verification status (admin)
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: driverId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Verification status of all documents
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Admin role required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/documents/{documentId}/verify:
+    put:
+      operationId: verifyDocument
+      tags: [Document]
+      summary: Approve or reject a driver document (admin)
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: documentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [approved, rejected]
+                rejection_reason:
+                  type: string
+                  description: Required if status = rejected
+      responses:
+        '200':
+          description: Document verification updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Admin role required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Settings ───────────────────────────
+  /settings:
+    get:
+      operationId: getSettings
+      tags: [Settings]
+      summary: Get user settings
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User settings
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    put:
+      operationId: updateSettings
+      tags: [Settings]
+      summary: Update user settings
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateSettingsRequest'
+      responses:
+        '200':
+          description: Settings updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─────────────────────────── Internal ───────────────────────────
+  /internal/users/lookup-by-phone:
+    post:
+      operationId: internalLookupUserByPhone
+      tags: [Internal]
+      summary: Check if a phone number belongs to a Clay user
+      description: |
+        Called by Payment Service during COD verification flow to determine
+        if the recipient has a Clay account. Returns user_id and basic info
+        if found, or `found: false` if no account exists.
+
+        **Not exposed via API Gateway** — internal service-to-service only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone:
+                  type: string
+                  description: Phone number with country code
+                  example: "+6281234567890"
+      responses:
+        '200':
+          description: Lookup result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  found:
+                    type: boolean
+                    example: true
+                  user_id:
+                    type: string
+                    format: uuid
+                    nullable: true
+                    description: User ID if found, null if not
+                  display_name:
+                    type: string
+                    nullable: true
+                    description: User's display name (for showing in sender's UI)
+                    example: "Budi S."
+                  has_active_device:
+                    type: boolean
+                    nullable: true
+                    description: Whether user has at least one active device token (can receive push)
+
+  /internal/users/{userId}:
+    get:
+      operationId: internalGetUser
+      tags: [Internal]
+      summary: Get user profile by ID (service-to-service)
+      description: |
+        Called by other services to get user basic info.
+        Not exposed via API Gateway.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProfileResponse'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Health ───────────────────────────
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: clay-user-service
+                  timestamp:
+                    type: string
+                    format: date-time
+
+# ═══════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # ── Profile Requests ──
+    CreateProfileRequest:
+      type: object
+      required: [full_name]
+      properties:
+        full_name:
+          type: string
+          maxLength: 100
+          example: Budi Santoso
+        birth_date:
+          type: string
+          format: date
+          example: "1995-03-15"
+        gender:
+          type: string
+          enum: [male, female, other]
+
+    UpdateProfileRequest:
+      type: object
+      properties:
+        full_name:
+          type: string
+          maxLength: 100
+        birth_date:
+          type: string
+          format: date
+        gender:
+          type: string
+          enum: [male, female, other]
+
+    # ── Address Request ──
+    AddressRequest:
+      type: object
+      required: [label, address, lat, lng]
+      properties:
+        label:
+          type: string
+          maxLength: 50
+          example: Rumah
+        address:
+          type: string
+          example: "Jl. Braga No. 1, Bandung"
+        lat:
+          type: number
+          format: double
+          example: -6.914744
+        lng:
+          type: number
+          format: double
+          example: 107.609810
+        notes:
+          type: string
+          example: "Pagar hitam, sebelah minimarket"
+        is_default:
+          type: boolean
+          default: false
+
+    # ── Driver Requests ──
+    CreateDriverProfileRequest:
+      type: object
+      required: [vehicle_type, plate_number, sim_number, ktp_number]
+      properties:
+        vehicle_type:
+          type: string
+          enum: [motor, car, truck]
+        plate_number:
+          type: string
+          maxLength: 20
+          example: "D 1234 ABC"
+        vehicle_brand:
+          type: string
+          maxLength: 50
+          example: Honda
+        vehicle_model:
+          type: string
+          maxLength: 50
+          example: Vario 160
+        vehicle_year:
+          type: integer
+          minimum: 2000
+          example: 2023
+        vehicle_color:
+          type: string
+          maxLength: 30
+          example: Hitam
+        sim_number:
+          type: string
+          maxLength: 30
+        ktp_number:
+          type: string
+          maxLength: 30
+
+    UpdateDriverProfileRequest:
+      type: object
+      properties:
+        vehicle_type:
+          type: string
+          enum: [motor, car, truck]
+        plate_number:
+          type: string
+        vehicle_brand:
+          type: string
+        vehicle_model:
+          type: string
+        vehicle_year:
+          type: integer
+        vehicle_color:
+          type: string
+
+    # ── Settings Request ──
+    UpdateSettingsRequest:
+      type: object
+      properties:
+        language:
+          type: string
+          example: id
+        notif_enabled:
+          type: boolean
+        marketing_enabled:
+          type: boolean
+
+    # ── Response Schemas ──
+    ProfileResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/UserProfile'
+
+    PublicProfileResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            user_id:
+              type: string
+              format: uuid
+            full_name:
+              type: string
+            avatar_url:
+              type: string
+              nullable: true
+            referral_code:
+              type: string
+
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        full_name:
+          type: string
+        avatar_url:
+          type: string
+          nullable: true
+        birth_date:
+          type: string
+          format: date
+          nullable: true
+        gender:
+          type: string
+          enum: [male, female, other]
+          nullable: true
+        referral_code:
+          type: string
+        referred_by:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AddressListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Address'
+
+    AddressResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/Address'
+
+    Address:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        label:
+          type: string
+        address:
+          type: string
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        notes:
+          type: string
+          nullable: true
+        is_default:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DriverProfileResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/DriverProfile'
+
+    DriverPublicProfileResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            driver_id:
+              type: string
+              format: uuid
+            full_name:
+              type: string
+            avatar_url:
+              type: string
+              nullable: true
+            vehicle_type:
+              type: string
+            plate_number:
+              type: string
+            vehicle_brand:
+              type: string
+            vehicle_model:
+              type: string
+            vehicle_color:
+              type: string
+            rating_avg:
+              type: number
+              format: double
+            total_trips:
+              type: integer
+
+    DriverProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        vehicle_type:
+          type: string
+          enum: [motor, car, truck]
+        plate_number:
+          type: string
+        vehicle_brand:
+          type: string
+        vehicle_model:
+          type: string
+        vehicle_year:
+          type: integer
+        vehicle_color:
+          type: string
+        sim_number:
+          type: string
+        ktp_number:
+          type: string
+        verification_status:
+          type: string
+          enum: [pending, verified, rejected]
+        rating_avg:
+          type: number
+          format: double
+          example: 4.85
+        total_trips:
+          type: integer
+          example: 1250
+        is_online:
+          type: boolean
+        last_online_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    DocumentListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/DriverDocument'
+
+    DocumentResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/DriverDocument'
+
+    DriverDocument:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        driver_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [ktp, sim, stnk, selfie]
+        file_url:
+          type: string
+          format: uri
+        status:
+          type: string
+          enum: [pending, approved, rejected]
+        rejection_reason:
+          type: string
+          nullable: true
+        verified_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SettingsResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/UserSettings'
+
+    UserSettings:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        language:
+          type: string
+          example: id
+        notif_enabled:
+          type: boolean
+          example: true
+        marketing_enabled:
+          type: boolean
+          example: false
+        updated_at:
+          type: string
+          format: date-time
+
+    MessageResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'

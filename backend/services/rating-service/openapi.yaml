@@ -1,0 +1,521 @@
+openapi: "3.0.3"
+info:
+  title: Clay Rating Service
+  version: "1.0.0"
+  description: |
+    Rating and review management for Clay superapp.
+
+    ## Responsibilities
+    - Accepts post-trip ratings from users for drivers and merchants
+    - Accepts post-trip ratings from drivers for passengers
+    - Stores reviews (text + score)
+    - Computes and caches average ratings per driver/merchant/passenger
+    - Exposes average rating to other services (Matching, Merchant)
+
+    ## Rating Subjects
+    - **Driver**: rated by user after ride/delivery/food order
+    - **Merchant**: rated by user after food order (alongside driver)
+    - **Passenger**: rated by driver after ride order
+
+    ## Score Scale
+    1–5 stars (integer). Half-stars not supported.
+
+    ## Storage
+    - **PostgreSQL**: `ratings` table (subject_type, subject_id, order_id, rater_id, score, review_text)
+    - **Redis**: `rating:avg:{subject_type}:{subject_id}` (cached average, TTL 1h)
+
+    ## Constraints
+    - One rating per (order_id, rater_id, subject_id) — enforced by unique index
+    - Rating window: 24h after order completion (enforced by checking order timestamps)
+
+servers:
+  - url: http://clay-rating-service:8080
+    description: Rating service
+
+tags:
+  - name: Rating
+    description: Submit and read ratings
+  - name: Internal
+    description: Service-to-service average rating queries
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Rating ────────────────────────────────────────────────────────────────
+
+  /ratings:
+    post:
+      summary: Submit a rating
+      operationId: submitRating
+      tags: [Rating]
+      description: |
+        Called by order services (via proxy) after trip completion.
+        Supports submitting multiple subjects in one call
+        (e.g., driver + merchant for food orders).
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitRatingRequest"
+      responses:
+        "201":
+          description: Rating submitted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RatingSubmitResponse"
+        "409":
+          description: Rating already submitted for this order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Rating window expired (> 24h after completion)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /ratings/{subjectType}/{subjectId}:
+    get:
+      summary: Get ratings for a subject (driver, merchant, passenger)
+      operationId: getRatings
+      tags: [Rating]
+      parameters:
+        - name: subjectType
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/SubjectType"
+        - name: subjectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+      responses:
+        "200":
+          description: Rating list with average
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RatingListResponse"
+
+  /ratings/orders/{orderId}:
+    get:
+      summary: Get all ratings submitted for a specific order
+      operationId: getOrderRatings
+      tags: [Rating]
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Ratings for this order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderRatingsResponse"
+        "404":
+          description: No ratings found for this order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /ratings/me/given:
+    get:
+      summary: Get ratings I have given
+      operationId: getMyGivenRatings
+      tags: [Rating]
+      description: |
+        Returns all ratings submitted by the authenticated user.
+        Useful for "rating history" screen in the user app.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+      responses:
+        "200":
+          description: Ratings I have given
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RatingListResponse"
+
+  /ratings/me/received:
+    get:
+      summary: Get ratings I have received (driver/passenger)
+      operationId: getMyReceivedRatings
+      tags: [Rating]
+      description: |
+        Returns all ratings received by the authenticated user.
+        For drivers: ratings from passengers.
+        For passengers: ratings from drivers.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+      responses:
+        "200":
+          description: Ratings I have received
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RatingListResponse"
+
+  # ── Internal ──────────────────────────────────────────────────────────────
+
+  /internal/ratings/driver/{driverId}/score:
+    get:
+      summary: Get driver aggregate score
+      operationId: getDriverScore
+      tags: [Internal]
+      description: |
+        Ambil aggregate score driver untuk prioritas match.
+        Khusus untuk Matching Service (seperti di rancangan).
+      parameters:
+        - name: driverId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Driver aggregate score
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AverageRatingResponse"
+        "404":
+          description: No ratings found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/ratings/{subjectType}/{subjectId}/average:
+    get:
+      summary: Get average rating for a subject
+      operationId: getAverageRating
+      tags: [Internal]
+      description: |
+        Returns cached average. Used by Matching Service (driver score) and
+        Merchant Service (merchant display rating).
+      parameters:
+        - name: subjectType
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/SubjectType"
+        - name: subjectId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Average rating
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AverageRatingResponse"
+        "404":
+          description: No ratings found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/ratings/batch-average:
+    post:
+      summary: Batch get average ratings for multiple subjects
+      operationId: batchGetAverageRatings
+      tags: [Internal]
+      description: Efficient bulk fetch for Matching Service when scoring multiple driver candidates.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchAverageRequest"
+      responses:
+        "200":
+          description: Batch average ratings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchAverageResponse"
+
+components:
+  parameters:
+    UserId:
+      name: X-User-ID
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Authenticated user ID (set by API Gateway from JWT)
+
+  schemas:
+    # ── Enums ────────────────────────────────────────────────────────────────
+
+    SubjectType:
+      type: string
+      enum: [driver, merchant, passenger]
+
+    # ── Submit Rating ─────────────────────────────────────────────────────────
+
+    SubmitRatingRequest:
+      type: object
+      required: [order_id, ratings]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        ratings:
+          type: array
+          items:
+            $ref: "#/components/schemas/RatingEntry"
+          minItems: 1
+          maxItems: 2
+          description: One entry for simple orders; two entries (driver + merchant) for food orders
+
+    RatingEntry:
+      type: object
+      required: [subject_type, subject_id, score]
+      properties:
+        subject_type:
+          $ref: "#/components/schemas/SubjectType"
+        subject_id:
+          type: string
+          format: uuid
+        score:
+          type: integer
+          minimum: 1
+          maximum: 5
+        review_text:
+          type: string
+          maxLength: 500
+          nullable: true
+        tags:
+          type: array
+          items:
+            type: string
+            example: "friendly"
+          description: Predefined quick-tag options (optional)
+
+    RatingSubmitResponse:
+      type: object
+      properties:
+        submitted:
+          type: array
+          items:
+            type: object
+            properties:
+              rating_id:
+                type: string
+                format: uuid
+              subject_type:
+                $ref: "#/components/schemas/SubjectType"
+              subject_id:
+                type: string
+                format: uuid
+              score:
+                type: integer
+
+    # ── Get Ratings ───────────────────────────────────────────────────────────
+
+    Rating:
+      type: object
+      properties:
+        rating_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        rater_id:
+          type: string
+          format: uuid
+        rater_name:
+          type: string
+          description: Display name (anonymized for driver/merchant — first name only)
+        score:
+          type: integer
+          minimum: 1
+          maximum: 5
+        review_text:
+          type: string
+          nullable: true
+        tags:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+
+    RatingListResponse:
+      type: object
+      properties:
+        subject_type:
+          $ref: "#/components/schemas/SubjectType"
+        subject_id:
+          type: string
+          format: uuid
+        average_score:
+          type: number
+          format: double
+        total_ratings:
+          type: integer
+        ratings:
+          type: array
+          items:
+            $ref: "#/components/schemas/Rating"
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    OrderRatingsResponse:
+      type: object
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        ratings:
+          type: array
+          items:
+            allOf:
+              - $ref: "#/components/schemas/Rating"
+              - type: object
+                properties:
+                  subject_type:
+                    $ref: "#/components/schemas/SubjectType"
+                  subject_id:
+                    type: string
+                    format: uuid
+
+    # ── Average ────────────────────────────────────────────────────────────────
+
+    AverageRatingResponse:
+      type: object
+      properties:
+        subject_type:
+          $ref: "#/components/schemas/SubjectType"
+        subject_id:
+          type: string
+          format: uuid
+        average_score:
+          type: number
+          format: double
+        total_ratings:
+          type: integer
+        from_cache:
+          type: boolean
+
+    BatchAverageRequest:
+      type: object
+      required: [subjects]
+      properties:
+        subjects:
+          type: array
+          items:
+            type: object
+            required: [subject_type, subject_id]
+            properties:
+              subject_type:
+                $ref: "#/components/schemas/SubjectType"
+              subject_id:
+                type: string
+                format: uuid
+          maxItems: 50
+
+    BatchAverageResponse:
+      type: object
+      properties:
+        results:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/AverageRatingResponse"
+          description: Map of "{subject_type}:{subject_id}" → AverageRatingResponse
+
+    # ── Common ────────────────────────────────────────────────────────────────
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: ALREADY_RATED
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

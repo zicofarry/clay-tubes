@@ -1,0 +1,1755 @@
+openapi: 3.0.3
+info:
+  title: Clay Food Order Service API
+  description: |
+    Manages the full lifecycle of food delivery orders (GoFood) on the Clay platform.
+
+    **Database:**
+    - PostgreSQL — food_orders, food_order_state_logs, food_fare_breakdown
+    - MongoDB — order_items (flexible variants & add-ons per item)
+    - Redis — hot order state cache (TTL 3h), anti-duplicate lock, merchant pending queue
+
+    **State Machine:**
+    ```
+    pending → confirmed → preparing → ready → picked_up → on_delivery → delivered
+       ↘        ↘
+     cancelled  cancelled
+     (free)    (grace 2min)
+    ```
+    After `preparing`, only Merchant or System can cancel (not user).
+
+    **Cancellation Policy (per actor × state):**
+    | State         | User              | Merchant          | Driver            | System            |
+    |---------------|-------------------|-------------------|-------------------|-------------------|
+    | `pending`     | ✅ Free cancel     | ✅ Reject order    | —                 | ✅ Timeout 5 min   |
+    | `confirmed`   | ⚠️ Grace 2 min    | ✅ Out of stock    | —                 | ✅ Fraud detected  |
+    | `preparing`   | ❌                 | ✅ Emergency only  | —                 | ✅ Force cancel    |
+    | `ready`       | ❌                 | ❌                 | ⚠️ Emergency only | ✅ Driver timeout  |
+    | `picked_up`+  | ❌                 | ❌                 | ⚠️ Emergency only | ✅ Force cancel    |
+
+    **Refund Rules:**
+    - Cancel at `pending` → full refund (instant for wallet, async for gateway)
+    - Cancel at `confirmed` (within grace) → full refund
+    - Merchant cancel at `preparing` → full refund + user gets coupon as apology
+    - System/driver cancel after `picked_up` → full refund + compensation coupon
+
+    **Key differences from Ride & Delivery Order:**
+    - Merchant must explicitly confirm the order (`pending → confirmed`)
+    - Merchant sets estimated preparation time
+    - Order items are stored in MongoDB (flexible variants & add-ons)
+    - Driver is matched after merchant confirms, not immediately after order created
+    - User cancel has strict grace period — once `preparing`, no user cancel
+
+    **Kafka Events Produced:**
+    - `Order_Created`   — consumed by Notification (notify merchant)
+    - `Order_Confirmed` — consumed by Matching (start finding driver), Notification
+    - `Order_Cancelled` — consumed by Payment, Matching, Notification
+    - `Trip_Completed`  — consumed by Payment, Rating, Chat, Notification
+
+    **Kafka Events Consumed:**
+    - `Driver_Found` (from Matching Service) — driver assigned after merchant confirms
+  version: 1.0.0
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://localhost:3006/api/v1
+    description: Local development
+  - url: https://api.clay.id/food/v1
+    description: Production (via API Gateway)
+
+tags:
+  - name: Order
+    description: User-facing food order management
+  - name: Merchant
+    description: Merchant-facing order management (confirm, prepare, ready)
+  - name: Driver
+    description: Driver-facing food order actions
+  - name: Fare
+    description: Fare estimation & breakdown
+  - name: Internal
+    description: Internal service-to-service endpoints (not exposed via API Gateway)
+
+paths:
+  # ─────────────────────────── Fare ───────────────────────────
+  /orders/estimate:
+    post:
+      operationId: estimateFoodFare
+      tags: [Fare]
+      summary: Estimate delivery fee before creating a food order
+      description: |
+        Computes delivery fee estimate based on user location and merchant location.
+        Also returns estimated total based on items subtotal if provided.
+        Does not create an order.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FareEstimateRequest'
+      responses:
+        '200':
+          description: Fare estimate calculated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FareEstimateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─────────────────────────── Order ───────────────────────────
+  /orders:
+    post:
+      operationId: createFoodOrder
+      tags: [Order]
+      summary: Create a new food order (GoFood)
+      description: |
+        Creates a food order and publishes `Order_Created` to Kafka.
+        Notification Service sends a push notification to the merchant.
+        Matching Service does NOT start yet — driver search starts only after
+        merchant confirms (`Order_Confirmed` event).
+
+        **Pre-conditions:**
+        - User must not have an active food order (`user:active_food:{user_id}` Redis key empty)
+        - Menu items are validated via Merchant Service (`/internal/menu-items/batch`)
+        - Item prices are fetched server-side — client prices are ignored
+        - GoPay: payment hold initiated before Kafka publish
+        - Cash: no hold
+
+        **Anti-duplicate:** Sets `user:active_food:{user_id}` in Redis (TTL 3h).
+        **Merchant queue:** Adds order to `merchant:pending_orders:{merchant_id}` Redis sorted set.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateFoodOrderRequest'
+      responses:
+        '201':
+          description: Food order created — awaiting merchant confirmation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Merchant or one or more menu items not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: MENU_ITEM_NOT_FOUND
+                  message: "Menu item 64f1a2b3c4d5e6f7a8b9c0d1 is no longer available"
+        '409':
+          description: User already has an active food order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: ACTIVE_ORDER_EXISTS
+                  message: You already have an active food order
+        '422':
+          description: Merchant is closed or promo code invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                merchant_closed:
+                  summary: Merchant is closed
+                  value:
+                    status: error
+                    error:
+                      code: MERCHANT_CLOSED
+                      message: This merchant is currently closed
+                invalid_promo:
+                  summary: Promo invalid
+                  value:
+                    status: error
+                    error:
+                      code: PROMO_INVALID
+                      message: Promo code is expired or not applicable
+        '503':
+          description: Upstream service unavailable (Merchant / Payment)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /orders/active:
+    get:
+      operationId: getActiveFoodOrder
+      tags: [Order]
+      summary: Get current user's active food order
+      description: |
+        Returns the user's currently active food order if any.
+        Served from Redis cache (`food_order:{order_id}`) when available.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Active food order found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No active food order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: NO_ACTIVE_ORDER
+                  message: No active food order found for this user
+
+  /orders/history:
+    get:
+      operationId: getFoodOrderHistory
+      tags: [Order]
+      summary: Get user's food order history (paginated)
+      description: Returns paginated list of past food orders sorted by `created_at DESC`.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [delivered, cancelled]
+        - name: merchant_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+          description: Filter by merchant
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Paginated list of past food orders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderHistoryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /orders/{orderId}:
+    get:
+      operationId: getFoodOrder
+      tags: [Order]
+      summary: Get food order detail by ID
+      description: |
+        Returns full order detail including order items (with variants & add-ons),
+        state logs, and delivery proof if available.
+        User, merchant owner, and assigned driver can access this endpoint.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Food order detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderDetailResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — caller is not the user, merchant, or assigned driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /orders/{orderId}/cancel:
+    post:
+      operationId: cancelFoodOrder
+      tags: [Order]
+      summary: Cancel a food order (user)
+      description: |
+        User cancellation with strict rules to protect merchants and drivers:
+
+        **Allowed states:**
+        - `pending` → Free cancel, full refund, no questions asked
+        - `confirmed` → Only within **2-minute grace period** after confirmation
+          (server checks `confirmed_at + 2 min > now`)
+
+        **Blocked states (HTTP 400):**
+        - `preparing` → Merchant already cooking, cannot cancel
+        - `ready`, `picked_up`, `on_delivery` → Food is ready/in transit
+        - `delivered` → Order completed
+
+        **Grace period logic:**
+        The order response includes `cancel_deadline` (ISO 8601 timestamp).
+        Client should show a countdown timer. After deadline, the cancel button
+        is disabled/hidden.
+
+        **Refund:**
+        - Full refund for `pending` cancel (instant wallet, async gateway)
+        - Full refund for `confirmed` cancel within grace period
+
+        Publishes `Order_Cancelled` Kafka event.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 255
+                  example: "Salah pilih menu"
+      responses:
+        '200':
+          description: Order cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderResponse'
+        '400':
+          description: |
+            Order cannot be cancelled. Possible reasons:
+            - State is `preparing` or later
+            - Grace period has expired (for `confirmed` state)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                preparing:
+                  summary: Merchant already preparing
+                  value:
+                    status: error
+                    error:
+                      code: CANNOT_CANCEL_PREPARING
+                      message: Tidak bisa cancel, merchant sudah mulai memasak pesanan kamu
+                grace_expired:
+                  summary: Grace period expired
+                  value:
+                    status: error
+                    error:
+                      code: CANCEL_GRACE_EXPIRED
+                      message: Batas waktu cancel sudah lewat (2 menit setelah dikonfirmasi)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the order owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /orders/{orderId}/rate:
+    post:
+      operationId: submitFoodRating
+      tags: [Order]
+      summary: Submit rating after food order is delivered
+      description: |
+        Submits ratings for both the driver and the merchant.
+        Validates order ownership and `delivered` status.
+        Forwards to Rating Service. Can only be submitted once per order.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitFoodRatingRequest'
+      responses:
+        '201':
+          description: Rating submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the order owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Rating already submitted for this order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: RATING_ALREADY_SUBMITTED
+                  message: You have already rated this order
+        '422':
+          description: Order is not in delivered state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /orders/{orderId}/fare-breakdown:
+    get:
+      operationId: getFoodFareBreakdown
+      tags: [Fare]
+      summary: Get fare breakdown for a completed food order
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Fare breakdown
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FareBreakdownResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found or fare not yet finalized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Merchant ───────────────────────────
+  /merchant/orders:
+    get:
+      operationId: merchantListOrders
+      tags: [Merchant]
+      summary: List incoming orders for the authenticated merchant
+      description: |
+        Returns orders for the merchant, defaulting to active orders
+        (`pending`, `confirmed`, `preparing`, `ready`).
+        Sorted by `created_at ASC` (oldest first — FIFO queue).
+
+        Also available in real-time via Redis sorted set
+        `merchant:pending_orders:{merchant_id}`.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, confirmed, preparing, ready, picked_up, on_delivery, delivered, cancelled]
+          description: Filter by status. Defaults to active statuses if omitted.
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
+      responses:
+        '200':
+          description: List of orders for this merchant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderHistoryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — caller is not a merchant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /merchant/orders/{orderId}/confirm:
+    post:
+      operationId: merchantConfirmOrder
+      tags: [Merchant]
+      summary: Merchant confirms the order
+      description: |
+        Merchant accepts the order and provides an estimated preparation time.
+        Transitions order from `pending` → `confirmed`.
+
+        Publishes `Order_Confirmed` Kafka event which triggers:
+        - Matching Service to start finding a driver
+        - Notification Service to notify the user
+
+        If merchant does not confirm within the timeout window (default 5 min),
+        the system auto-cancels via `Order_Cancelled` event.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [est_prep_time_min]
+              properties:
+                est_prep_time_min:
+                  type: integer
+                  minimum: 1
+                  maximum: 120
+                  description: Estimated preparation time in minutes
+                  example: 20
+      responses:
+        '200':
+          description: Order confirmed — driver search initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderResponse'
+        '400':
+          description: Order is not in pending state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: INVALID_STATE_TRANSITION
+                  message: Order is not in pending state
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the merchant owner of this order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /merchant/orders/{orderId}/reject:
+    post:
+      operationId: merchantRejectOrder
+      tags: [Merchant]
+      summary: Merchant rejects the order
+      description: |
+        Merchant rejects the order with a reason.
+        Transitions order from `pending` → `cancelled` (cancelled_by = merchant).
+        Publishes `Order_Cancelled` Kafka event — full refund issued.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+                  enum: [out_of_stock, closing_soon, too_busy, other]
+                  example: out_of_stock
+                notes:
+                  type: string
+                  maxLength: 255
+                  example: "Bahan baku habis"
+      responses:
+        '200':
+          description: Order rejected — cancelled with full refund
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderResponse'
+        '400':
+          description: Order is not in pending state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the merchant owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /merchant/orders/{orderId}/status:
+    put:
+      operationId: merchantUpdateOrderStatus
+      tags: [Merchant]
+      summary: Merchant updates preparation status
+      description: |
+        Merchant progresses the order through preparation stages.
+
+        **Allowed transitions per `action`:**
+
+        | action | from_state | to_state |
+        |--------|-----------|----------|
+        | `start_preparing` | `confirmed` | `preparing` |
+        | `mark_ready` | `preparing` | `ready` |
+
+        Once `ready`, the order is waiting for driver pickup.
+        These transitions trigger Notification events to update the user.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [start_preparing, mark_ready]
+                  example: start_preparing
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderResponse'
+        '400':
+          description: Invalid action or wrong current state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: INVALID_STATE_TRANSITION
+                  message: Cannot perform mark_ready on order in confirmed state
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the merchant owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Driver ───────────────────────────
+  /driver/orders/{orderId}/accept:
+    post:
+      operationId: driverAcceptFoodOrder
+      tags: [Driver]
+      summary: Driver accepts a broadcast food order
+      description: |
+        Called by driver app when driver taps "Accept".
+        Transitions order from `confirmed` → driver assigned (status stays `confirmed`,
+        `driver_id` field is populated).
+
+        Driver is matched only after merchant confirms, so driver sees the restaurant
+        location and can decide if it's feasible.
+
+        Returns full order info including merchant address and item list.
+
+        Race condition: if another driver already accepted, returns `409 ALREADY_TAKEN`.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Order accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriverAcceptFoodResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — caller is not a driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Order already taken by another driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: ORDER_ALREADY_TAKEN
+                  message: This order has already been accepted by another driver
+
+  /driver/orders/{orderId}/reject:
+    post:
+      operationId: driverRejectFoodOrder
+      tags: [Driver]
+      summary: Driver rejects a broadcast food order
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  enum: [too_far, restaurant_busy, personal_reason, other]
+                  example: too_far
+      responses:
+        '200':
+          description: Order rejected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — caller is not a driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /driver/orders/{orderId}/status:
+    put:
+      operationId: driverUpdateFoodStatus
+      tags: [Driver]
+      summary: Driver updates food order delivery status
+      description: |
+        Unified endpoint for driver to progress food delivery through its lifecycle.
+
+        **Allowed transitions per `action`:**
+
+        | action | from_state | to_state | extra required |
+        |--------|-----------|----------|----------------|
+        | `arrived_at_restaurant` | `confirmed` | `confirmed` (driver_at_restaurant=true) | — |
+        | `picked_up` | `ready` | `picked_up` | — |
+        | `start_delivery` | `picked_up` | `on_delivery` | — |
+        | `complete_delivery` | `on_delivery` | `delivered` | `actual_distance_km`, `actual_duration_min` |
+
+        Note: `arrived_at_restaurant` does not change status — it just notifies
+        the user that driver is at the restaurant. On `complete_delivery`:
+        calculates `fare_final`, publishes `Trip_Completed`.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DriverUpdateFoodStatusRequest'
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderResponse'
+        '400':
+          description: Invalid action or wrong state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                food_not_ready:
+                  summary: Food not ready yet
+                  value:
+                    status: error
+                    error:
+                      code: FOOD_NOT_READY
+                      message: Cannot pick up — merchant has not marked the order as ready
+                wrong_state:
+                  summary: Wrong state
+                  value:
+                    status: error
+                    error:
+                      code: INVALID_STATE_TRANSITION
+                      message: Cannot perform start_delivery on order in confirmed state
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the assigned driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Internal ───────────────────────────
+  /internal/orders:
+    post:
+      operationId: internalCreateFoodOrder
+      tags: [Internal]
+      summary: Create food order from internal orchestrator
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalCreateOrderRequest'
+      responses:
+        '201':
+          description: Food order created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          description: User already has an active food order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/orders/{orderId}:
+    get:
+      operationId: internalGetFoodOrder
+      tags: [Internal]
+      summary: Get food order data for internal service calls
+      description: Called by Chat, Tracking, and Notification services.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Food order internal data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderInternalResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/orders/{orderId}/status:
+    put:
+      operationId: internalUpdateFoodStatus
+      tags: [Internal]
+      summary: Update food order status from another service
+      description: |
+        Used by Matching Service to assign driver or cancel due to no driver found.
+        Also used by system to auto-cancel orders not confirmed by merchant within timeout.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalUpdateStatusRequest'
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FoodOrderInternalResponse'
+        '400':
+          description: Invalid state transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Order is already in a terminal state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/orders/{orderId}/assign-driver:
+    put:
+      operationId: internalAssignFoodDriver
+      tags: [Internal]
+      summary: Assign driver to food order (called by Matching Service)
+      description: |
+        Assigns a driver after merchant has confirmed the order.
+        Driver assignment does not change the order status — status stays `confirmed`
+        while driver is en route to restaurant.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [driver_id, eta_to_restaurant_seconds]
+              properties:
+                driver_id:
+                  type: string
+                  format: uuid
+                eta_to_restaurant_seconds:
+                  type: integer
+                  description: ETA for driver to arrive at restaurant
+                  example: 300
+      responses:
+        '200':
+          description: Driver assigned
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    properties:
+                      order_id:
+                        type: string
+                        format: uuid
+                      driver_id:
+                        type: string
+                        format: uuid
+                      status:
+                        type: string
+                        example: confirmed
+                      eta_to_restaurant_seconds:
+                        type: integer
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Order is not in confirmed state or driver already assigned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Health ───────────────────────────
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: clay-food-order-service
+                  timestamp:
+                    type: string
+                    format: date-time
+
+# ═══════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Food order UUID
+
+  schemas:
+    # ── Request Schemas ───────────────────────────────────────────
+    OrderItemInput:
+      type: object
+      required: [menu_item_id, quantity]
+      properties:
+        menu_item_id:
+          type: string
+          description: MongoDB ObjectId of the menu item
+          example: "64f1a2b3c4d5e6f7a8b9c0d1"
+        quantity:
+          type: integer
+          minimum: 1
+          maximum: 99
+          example: 2
+        notes:
+          type: string
+          maxLength: 255
+          description: Special instructions for this item
+          example: "Jangan pakai bawang"
+        selected_variants:
+          type: array
+          description: One option selected per variant group
+          items:
+            type: object
+            required: [variant_name, option_label]
+            properties:
+              variant_name:
+                type: string
+                example: "Tingkat Kepedasan"
+              option_label:
+                type: string
+                example: "Pedas"
+        selected_addons:
+          type: array
+          description: Zero or more add-on options
+          items:
+            type: object
+            required: [addon_name, option_label, quantity]
+            properties:
+              addon_name:
+                type: string
+                example: "Tambahan Lauk"
+              option_label:
+                type: string
+                example: "Telur Dadar"
+              quantity:
+                type: integer
+                minimum: 1
+                default: 1
+
+    CreateFoodOrderRequest:
+      type: object
+      required: [merchant_id, items, delivery_lat, delivery_lng, payment_method]
+      properties:
+        merchant_id:
+          type: string
+          format: uuid
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/OrderItemInput'
+        delivery_lat:
+          type: number
+          format: double
+          example: -6.921000
+        delivery_lng:
+          type: number
+          format: double
+          example: 107.607000
+        delivery_address:
+          type: string
+          example: "Jl. Dago No.5, Bandung"
+        delivery_notes:
+          type: string
+          maxLength: 255
+          example: "Tolong jangan telat, lagi lapar banget"
+        payment_method:
+          type: string
+          enum: [gopay, cash]
+          example: gopay
+        promo_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    FareEstimateRequest:
+      type: object
+      required: [merchant_id, delivery_lat, delivery_lng]
+      properties:
+        merchant_id:
+          type: string
+          format: uuid
+        delivery_lat:
+          type: number
+          format: double
+        delivery_lng:
+          type: number
+          format: double
+        items_subtotal:
+          type: number
+          format: double
+          description: Optional — if provided, returns estimated total including delivery fee
+          example: 50000
+        promo_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    DriverUpdateFoodStatusRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [arrived_at_restaurant, picked_up, start_delivery, complete_delivery]
+          example: picked_up
+        actual_distance_km:
+          type: number
+          format: double
+          description: Required when action = complete_delivery
+          example: 2.8
+        actual_duration_min:
+          type: integer
+          description: Required when action = complete_delivery
+          example: 15
+        delivery_lat:
+          type: number
+          format: double
+          description: Optional — actual delivery coordinates
+        delivery_lng:
+          type: number
+          format: double
+
+    SubmitFoodRatingRequest:
+      type: object
+      required: [driver_score, merchant_score]
+      properties:
+        driver_score:
+          type: integer
+          minimum: 1
+          maximum: 5
+          example: 5
+        driver_comment:
+          type: string
+          maxLength: 500
+          example: "Driver cepat dan ramah"
+        driver_tags:
+          type: array
+          items:
+            type: string
+          example: ["on_time", "friendly"]
+        merchant_score:
+          type: integer
+          minimum: 1
+          maximum: 5
+          example: 4
+        merchant_comment:
+          type: string
+          maxLength: 500
+          example: "Makanan enak, porsi banyak"
+        merchant_tags:
+          type: array
+          items:
+            type: string
+          example: ["good_portion", "tasty", "packaging_good"]
+
+    InternalCreateOrderRequest:
+      allOf:
+        - $ref: '#/components/schemas/CreateFoodOrderRequest'
+        - type: object
+          required: [user_id]
+          properties:
+            user_id:
+              type: string
+              format: uuid
+
+    InternalUpdateStatusRequest:
+      type: object
+      required: [status, actor_type]
+      properties:
+        status:
+          type: string
+          enum: [confirmed, preparing, ready, picked_up, on_delivery, delivered, cancelled]
+        actor_type:
+          type: string
+          enum: [user, merchant, driver, system]
+          example: system
+        actor_id:
+          type: string
+          format: uuid
+          nullable: true
+        reason:
+          type: string
+          example: no_driver_found
+        metadata:
+          type: object
+          additionalProperties: true
+
+    # ── Core Object Schemas ───────────────────────────────────────
+    OrderItemVariantSelection:
+      type: object
+      properties:
+        variant_name:
+          type: string
+        option_label:
+          type: string
+        price_delta:
+          type: number
+          format: double
+
+    OrderItemAddonSelection:
+      type: object
+      properties:
+        addon_name:
+          type: string
+        option_label:
+          type: string
+        price:
+          type: number
+          format: double
+        quantity:
+          type: integer
+
+    OrderItem:
+      type: object
+      description: Stored in MongoDB — flexible schema with variants & add-ons
+      properties:
+        id:
+          type: string
+          description: MongoDB ObjectId
+        order_id:
+          type: string
+          format: uuid
+        menu_item_id:
+          type: string
+          description: MongoDB ObjectId
+        name:
+          type: string
+          description: Item name at time of order (snapshot)
+        base_price:
+          type: number
+          format: double
+        quantity:
+          type: integer
+        notes:
+          type: string
+          nullable: true
+        selected_variants:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderItemVariantSelection'
+        selected_addons:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderItemAddonSelection'
+        subtotal:
+          type: number
+          format: double
+          description: (base_price + variant deltas + addon prices) × quantity
+        item_snapshot:
+          type: object
+          description: Full snapshot of menu item at time of order
+          properties:
+            name:
+              type: string
+            image_url:
+              type: string
+              nullable: true
+            description:
+              type: string
+              nullable: true
+
+    FoodOrder:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        driver_id:
+          type: string
+          format: uuid
+          nullable: true
+        merchant_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending, confirmed, preparing, ready, picked_up, on_delivery, delivered, cancelled]
+        delivery_lat:
+          type: number
+          format: double
+        delivery_lng:
+          type: number
+          format: double
+        delivery_address:
+          type: string
+        delivery_notes:
+          type: string
+          nullable: true
+        subtotal:
+          type: number
+          format: double
+          description: Sum of all order items
+        delivery_fee:
+          type: number
+          format: double
+        promo_discount:
+          type: number
+          format: double
+        platform_fee:
+          type: number
+          format: double
+        total:
+          type: number
+          format: double
+        payment_method:
+          type: string
+          enum: [gopay, cash]
+        est_prep_time_min:
+          type: integer
+          nullable: true
+          description: Set by merchant on confirmation
+        est_delivery_at:
+          type: string
+          format: date-time
+          nullable: true
+        actual_delivery_at:
+          type: string
+          format: date-time
+          nullable: true
+        cancel_reason:
+          type: string
+          nullable: true
+        cancelled_by:
+          type: string
+          enum: [user, merchant, driver, system]
+          nullable: true
+        confirmed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the merchant confirmed the order. Used to calculate cancel grace period.
+        cancel_deadline:
+          type: string
+          format: date-time
+          nullable: true
+          description: |
+            Deadline for user cancellation (confirmed_at + 2 minutes).
+            Null when status is `pending` (can cancel freely) or after `preparing` (cannot cancel at all).
+            Client should show a countdown timer and disable cancel button after this time.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    OrderStateLog:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        from_state:
+          type: string
+          nullable: true
+        to_state:
+          type: string
+        actor_type:
+          type: string
+          enum: [user, merchant, driver, system]
+        reason:
+          type: string
+          nullable: true
+        changed_at:
+          type: string
+          format: date-time
+
+    FareBreakdown:
+      type: object
+      properties:
+        items_subtotal:
+          type: number
+          format: double
+        delivery_fee:
+          type: number
+          format: double
+        small_order_fee:
+          type: number
+          format: double
+          description: Applied when subtotal is below minimum order threshold
+        promo_discount:
+          type: number
+          format: double
+        platform_fee:
+          type: number
+          format: double
+        total:
+          type: number
+          format: double
+
+    # ── Response Schemas ──────────────────────────────────────────
+    FoodOrderResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/FoodOrder'
+
+    FoodOrderDetailResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          allOf:
+            - $ref: '#/components/schemas/FoodOrder'
+            - type: object
+              properties:
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/OrderItem'
+                state_logs:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/OrderStateLog'
+
+    FoodOrderHistoryResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/FoodOrder'
+        meta:
+          type: object
+          properties:
+            page:
+              type: integer
+              example: 1
+            limit:
+              type: integer
+              example: 10
+            total:
+              type: integer
+              example: 35
+            total_pages:
+              type: integer
+              example: 4
+
+    DriverAcceptFoodResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            order_id:
+              type: string
+              format: uuid
+            status:
+              type: string
+              example: confirmed
+            merchant_id:
+              type: string
+              format: uuid
+            merchant_name:
+              type: string
+              example: "Warung Nasi Padang Maju"
+            merchant_lat:
+              type: number
+              format: double
+            merchant_lng:
+              type: number
+              format: double
+            merchant_address:
+              type: string
+            delivery_address:
+              type: string
+            delivery_lat:
+              type: number
+              format: double
+            delivery_lng:
+              type: number
+              format: double
+            delivery_fee:
+              type: number
+              format: double
+            payment_method:
+              type: string
+            items_count:
+              type: integer
+              description: Total number of items to pick up
+              example: 3
+
+    FareEstimateResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            distance_km:
+              type: number
+              format: double
+              example: 2.8
+            duration_min:
+              type: integer
+              example: 15
+            delivery_fee:
+              type: number
+              format: double
+              example: 10000
+            small_order_fee:
+              type: number
+              format: double
+              example: 0
+            surge_multiplier:
+              type: number
+              format: double
+              example: 1.0
+            promo_discount:
+              type: number
+              format: double
+              example: 5000
+            estimated_total:
+              type: number
+              format: double
+              nullable: true
+              description: Only returned if items_subtotal was provided in request
+              example: 55000
+            breakdown:
+              $ref: '#/components/schemas/FareBreakdown'
+
+    FareBreakdownResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/FareBreakdown'
+
+    FoodOrderInternalResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+            driver_id:
+              type: string
+              format: uuid
+              nullable: true
+            merchant_id:
+              type: string
+              format: uuid
+            status:
+              type: string
+            payment_method:
+              type: string
+            total:
+              type: number
+              format: double
+              nullable: true
+            created_at:
+              type: string
+              format: date-time
+
+    # ── Common ────────────────────────────────────────────────────
+    MessageResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: ORDER_NOT_FOUND
+            message:
+              type: string
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'

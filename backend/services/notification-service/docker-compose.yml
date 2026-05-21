@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  postgres-notification:
+    image: postgres:15-alpine
+    container_name: clay_notification_postgres
+    environment:
+      POSTGRES_USER: clay_user
+      POSTGRES_PASSWORD: clay_password
+      POSTGRES_DB: notification_db
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_notification_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U clay_user -d notification_db" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-notification:
+    image: redis:7-alpine
+    container_name: clay_notification_redis
+    ports:
+      - "6375:6379"
+
+  adminer:
+    image: adminer
+    container_name: clay_notification_adminer
+    restart: always
+    ports:
+      - "9005:8080"
+
+volumes:
+  postgres_notification_data:

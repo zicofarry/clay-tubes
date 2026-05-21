@@ -1,0 +1,585 @@
+openapi: "3.0.3"
+info:
+  title: Clay Promotion Service
+  version: "1.0.0"
+  description: |
+    Promo code and voucher management for Clay superapp.
+
+    ## Responsibilities
+    - Creates and manages promo campaigns (admin)
+    - Validates promo codes at checkout (called by Pricing Service / order services)
+    - Tracks promo usage to enforce per-user and global limits
+    - Issues cashback credits after successful orders
+    - Supports voucher distribution (referral, milestone rewards)
+
+    ## Promo Types
+    - **PERCENTAGE_OFF**: e.g., 20% off delivery fee, max discount cap
+    - **FIXED_OFF**: e.g., IDR 10.000 off order total
+    - **FREE_DELIVERY**: delivery fee waived up to a max amount
+    - **CASHBACK**: credit back to wallet after order completes
+
+    ## Validity Rules
+    - `valid_from` / `valid_until` date range
+    - `min_order_amount` threshold
+    - `usage_limit` total uses across all users
+    - `per_user_limit` uses per individual user
+    - `applicable_service` filter (ride / food / delivery / all)
+
+    ## Storage
+    - **PostgreSQL**: `promos` (campaign definitions), `promo_usages` (redemption log)
+    - **Redis**: `promo:usage_count:{promo_id}` (atomic counter for fast limit checks)
+
+    ## Kafka Events
+    ### Consumed
+    - `order.completed` → trigger cashback credit if promo type is cashback
+    ### Produced
+    - `promo.applied` → for audit/analytics
+
+servers:
+  - url: http://clay-promotion-service:8080
+    description: Promotion service
+
+tags:
+  - name: Promo
+    description: Promo code listing and validation
+  - name: Voucher
+    description: User voucher management
+  - name: Admin
+    description: Promo campaign management (admin only)
+  - name: Internal
+    description: Service-to-service validation endpoints
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Promo ─────────────────────────────────────────────────────────────────
+
+  /promos/validate:
+    post:
+      summary: Validate and preview a promo code
+      operationId: validatePromo
+      tags: [Promo]
+      description: |
+        Checks promo eligibility without consuming usage quota.
+        Returns the discount amount for the given order context.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ValidatePromoRequest"
+      responses:
+        "200":
+          description: Promo valid — discount preview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromoValidationResponse"
+        "422":
+          description: Promo invalid (expired, limit reached, not applicable)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Voucher ───────────────────────────────────────────────────────────────
+
+  /vouchers:
+    get:
+      summary: List user's available vouchers
+      operationId: listMyVouchers
+      tags: [Voucher]
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: service_type
+          in: query
+          schema:
+            $ref: "#/components/schemas/ServiceType"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [available, used, expired]
+      responses:
+        "200":
+          description: User's vouchers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VoucherListResponse"
+
+  /vouchers/claim:
+    post:
+      summary: Claim a promo code as a personal voucher
+      operationId: claimVoucher
+      tags: [Voucher]
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClaimVoucherRequest"
+      responses:
+        "201":
+          description: Voucher claimed successfully
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Voucher"
+        "409":
+          description: Already claimed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Code invalid, expired, or limit reached
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Admin ─────────────────────────────────────────────────────────────────
+
+  /admin/promos:
+    get:
+      summary: List all promo campaigns
+      operationId: adminListPromos
+      tags: [Admin]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [active, inactive, expired]
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Promo list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PromoListResponse"
+    post:
+      summary: Create a new promo campaign
+      operationId: createPromo
+      tags: [Admin]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePromoRequest"
+      responses:
+        "201":
+          description: Promo created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Promo"
+        "409":
+          description: Promo code already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/promos/{promoId}:
+    put:
+      summary: Update a promo campaign
+      operationId: updatePromo
+      tags: [Admin]
+      parameters:
+        - $ref: "#/components/parameters/PromoId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdatePromoRequest"
+      responses:
+        "200":
+          description: Promo updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Promo"
+    delete:
+      summary: Deactivate a promo campaign
+      operationId: deactivatePromo
+      tags: [Admin]
+      parameters:
+        - $ref: "#/components/parameters/PromoId"
+      responses:
+        "200":
+          description: Promo deactivated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  # ── Internal ──────────────────────────────────────────────────────────────
+
+  /internal/promos/apply:
+    post:
+      summary: Apply a promo code to an order (consumes usage quota)
+      operationId: applyPromo
+      tags: [Internal]
+      description: |
+        Called by Pricing Service at order creation time.
+        Atomically increments usage counters and records the redemption.
+        Idempotent per order_id — safe to call twice for the same order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApplyPromoRequest"
+      responses:
+        "200":
+          description: Promo applied, discount amount confirmed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApplyPromoResponse"
+        "422":
+          description: Promo no longer valid (race condition — limit reached)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/promos/release:
+    post:
+      summary: Release a promo usage slot (order cancelled before payment)
+      operationId: releasePromo
+      tags: [Internal]
+      description: |
+        Decrements usage counter if order is cancelled before completing payment.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReleasePromoRequest"
+      responses:
+        "200":
+          description: Usage slot released
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+components:
+  parameters:
+    UserId:
+      name: X-User-ID
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Authenticated user ID (set by API Gateway from JWT)
+
+    PromoId:
+      name: promoId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    # ── Enums ────────────────────────────────────────────────────────────────
+
+    ServiceType:
+      type: string
+      enum: [ride, delivery, food, all]
+
+    PromoType:
+      type: string
+      enum: [percentage_off, fixed_off, free_delivery, cashback]
+
+    # ── Promo ─────────────────────────────────────────────────────────────────
+
+    Promo:
+      type: object
+      properties:
+        promo_id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          example: "CLAYEATS20"
+        type:
+          $ref: "#/components/schemas/PromoType"
+        discount_value:
+          type: number
+          description: |
+            Meaning depends on type:
+            - percentage_off: percentage (e.g., 20 = 20%)
+            - fixed_off / free_delivery / cashback: IDR amount
+        max_discount_amount:
+          type: integer
+          description: Cap for percentage_off discounts (IDR)
+          nullable: true
+        min_order_amount:
+          type: integer
+          description: Minimum order total to apply (IDR)
+        applicable_service:
+          $ref: "#/components/schemas/ServiceType"
+        usage_limit:
+          type: integer
+          description: Total redemptions allowed across all users; 0 = unlimited
+        per_user_limit:
+          type: integer
+          description: Max redemptions per user; 0 = unlimited
+        current_usage_count:
+          type: integer
+        valid_from:
+          type: string
+          format: date-time
+        valid_until:
+          type: string
+          format: date-time
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    PromoListResponse:
+      type: object
+      properties:
+        promos:
+          type: array
+          items:
+            $ref: "#/components/schemas/Promo"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    CreatePromoRequest:
+      type: object
+      required: [code, type, discount_value, valid_from, valid_until, applicable_service]
+      properties:
+        code:
+          type: string
+          pattern: "^[A-Z0-9]{4,20}$"
+        type:
+          $ref: "#/components/schemas/PromoType"
+        discount_value:
+          type: number
+        max_discount_amount:
+          type: integer
+          nullable: true
+        min_order_amount:
+          type: integer
+          default: 0
+        applicable_service:
+          $ref: "#/components/schemas/ServiceType"
+        usage_limit:
+          type: integer
+          default: 0
+        per_user_limit:
+          type: integer
+          default: 1
+        valid_from:
+          type: string
+          format: date-time
+        valid_until:
+          type: string
+          format: date-time
+
+    UpdatePromoRequest:
+      type: object
+      properties:
+        is_active:
+          type: boolean
+        valid_until:
+          type: string
+          format: date-time
+        usage_limit:
+          type: integer
+        per_user_limit:
+          type: integer
+
+    # ── Validation ────────────────────────────────────────────────────────────
+
+    ValidatePromoRequest:
+      type: object
+      required: [code, user_id, service_type, order_amount]
+      properties:
+        code:
+          type: string
+        user_id:
+          type: string
+          format: uuid
+        service_type:
+          $ref: "#/components/schemas/ServiceType"
+        order_amount:
+          type: integer
+          description: Order total before discount (IDR)
+        delivery_fee:
+          type: integer
+          description: Delivery fee component, for free_delivery type
+
+    PromoValidationResponse:
+      type: object
+      properties:
+        promo_id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        type:
+          $ref: "#/components/schemas/PromoType"
+        discount_amount:
+          type: integer
+          description: IDR discount amount for this specific order
+        description:
+          type: string
+          example: "20% off, max IDR 25.000"
+
+    # ── Voucher ────────────────────────────────────────────────────────────────
+
+    Voucher:
+      type: object
+      properties:
+        voucher_id:
+          type: string
+          format: uuid
+        promo_id:
+          type: string
+          format: uuid
+        code:
+          type: string
+        type:
+          $ref: "#/components/schemas/PromoType"
+        discount_value:
+          type: number
+        applicable_service:
+          $ref: "#/components/schemas/ServiceType"
+        min_order_amount:
+          type: integer
+        valid_until:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [available, used, expired]
+
+    VoucherListResponse:
+      type: object
+      properties:
+        vouchers:
+          type: array
+          items:
+            $ref: "#/components/schemas/Voucher"
+        total:
+          type: integer
+
+    ClaimVoucherRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    ApplyPromoRequest:
+      type: object
+      required: [promo_code, order_id, user_id, service_type, order_amount]
+      properties:
+        promo_code:
+          type: string
+        order_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        service_type:
+          $ref: "#/components/schemas/ServiceType"
+        order_amount:
+          type: integer
+        delivery_fee:
+          type: integer
+          nullable: true
+
+    ApplyPromoResponse:
+      type: object
+      properties:
+        promo_id:
+          type: string
+          format: uuid
+        discount_amount:
+          type: integer
+        type:
+          $ref: "#/components/schemas/PromoType"
+
+    ReleasePromoRequest:
+      type: object
+      required: [promo_code, order_id, user_id]
+      properties:
+        promo_code:
+          type: string
+        order_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+
+    # ── Common ────────────────────────────────────────────────────────────────
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: PROMO_EXPIRED
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string

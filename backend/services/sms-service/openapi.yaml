@@ -1,0 +1,303 @@
+openapi: "3.0.3"
+info:
+  title: Clay SMS Service
+  version: "1.0.0"
+  description: |
+    Transactional SMS delivery service for Clay superapp.
+
+    ## Responsibilities
+    - Sends OTP codes via SMS for login and trip verification
+    - Sends order status SMS notifications
+    - Tracks delivery status via provider webhook
+    - Rate limits and deduplicates OTP sends
+
+    ## Provider
+    - Primary: Twilio
+    - Fallback: Nexmo (Vonage)
+    - Indonesian local: Zenziva (for cost optimization on domestic numbers)
+
+    ## OTP Flow
+    1. Auth Service calls `POST /internal/sms/otp/send` with phone number
+    2. SMS Service generates 6-digit OTP, stores in Redis with TTL 5 min
+    3. Sends SMS via provider
+    4. Auth Service calls `POST /internal/sms/otp/verify` to validate user input
+
+    ## Storage (Redis Only)
+    - **Redis**: `sms:otp:{phone}:{purpose}` (OTP code, TTL 5 min)
+    - **Redis**: `sms:rate:{phone}` (counter, TTL 1h) — max 10 SMS/hour per number
+    - **Redis**: `sms:retry:{message_id}` (HASH: phone, message, attempts — TTL 24h)
+
+servers:
+  - url: http://clay-sms-service:8021
+    description: SMS service (internal only)
+
+tags:
+  - name: OTP
+    description: OTP generation and verification
+  - name: SMS
+    description: SMS send and status
+  - name: Internal
+    description: Service-to-service endpoints
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /internal/sms/otp/send:
+    post:
+      summary: Send OTP to a phone number
+      operationId: sendOTP
+      tags: [OTP]
+      description: |
+        Generates OTP, stores in Redis, sends SMS.
+        Idempotent within 60s — same OTP resent if called again within cooldown.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendOTPRequest"
+      responses:
+        "200":
+          description: OTP sent
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendOTPResponse"
+        "429":
+          description: Rate limit exceeded (max 5 OTPs/hour)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/sms/otp/verify:
+    post:
+      summary: Verify an OTP code
+      operationId: verifyOTP
+      tags: [OTP]
+      description: |
+        Validates OTP. Increments attempt counter (max 3 attempts before invalidation).
+        On success, deletes the OTP from Redis.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyOTPRequest"
+      responses:
+        "200":
+          description: OTP valid
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifyOTPResponse"
+        "400":
+          description: Invalid or expired OTP
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Too many failed attempts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/sms/send:
+    post:
+      summary: Send a plain SMS message
+      operationId: sendSMS
+      tags: [SMS]
+      description: For non-OTP notifications (e.g., order status update for non-app users).
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendSMSRequest"
+      responses:
+        "202":
+          description: SMS queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendSMSResponse"
+
+  /webhooks/sms/delivery:
+    post:
+      summary: Provider delivery status webhook
+      operationId: smsDeliveryWebhook
+      tags: [SMS]
+      description: Called by Twilio/Nexmo when SMS delivery status changes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Provider-specific payload
+      responses:
+        "200":
+          description: Webhook processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /internal/sms/status/{smsId}:
+    get:
+      summary: Check SMS delivery status
+      operationId: getSmsStatus
+      tags: [SMS]
+      description: |
+        Cek status pengiriman SMS berdasarkan sms_id.
+        Status: queued → sent → delivered / failed.
+      parameters:
+        - name: smsId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: SMS delivery status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SmsStatusResponse"
+        "404":
+          description: SMS not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    OTPPurpose:
+      type: string
+      enum: [login, trip_start, account_verification]
+
+    SendOTPRequest:
+      type: object
+      required: [phone, purpose]
+      properties:
+        phone:
+          type: string
+          pattern: "^\\+62[0-9]{9,12}$"
+          example: "+6281234567890"
+        purpose:
+          $ref: "#/components/schemas/OTPPurpose"
+
+    SendOTPResponse:
+      type: object
+      properties:
+        phone:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        resend_cooldown_seconds:
+          type: integer
+          description: Seconds before resend is allowed
+
+    VerifyOTPRequest:
+      type: object
+      required: [phone, otp_code, purpose]
+      properties:
+        phone:
+          type: string
+          pattern: "^\\+62[0-9]{9,12}$"
+        otp_code:
+          type: string
+          pattern: "^[0-9]{6}$"
+        purpose:
+          $ref: "#/components/schemas/OTPPurpose"
+
+    VerifyOTPResponse:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        phone:
+          type: string
+
+    SendSMSRequest:
+      type: object
+      required: [to, message]
+      properties:
+        to:
+          type: string
+          pattern: "^\\+62[0-9]{9,12}$"
+        message:
+          type: string
+          maxLength: 160
+
+    SendSMSResponse:
+      type: object
+      properties:
+        sms_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued]
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    SmsStatusResponse:
+      type: object
+      properties:
+        sms_id:
+          type: string
+          format: uuid
+        to:
+          type: string
+        status:
+          type: string
+          enum: [queued, sent, delivered, failed]
+        attempts:
+          type: integer
+          description: Number of delivery attempts
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: OTP_EXPIRED
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string

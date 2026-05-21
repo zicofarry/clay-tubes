@@ -1,0 +1,554 @@
+openapi: "3.0.3"
+info:
+  title: Clay Pricing Service
+  version: "1.0.0"
+  description: |
+    Fare calculation engine for Clay superapp.
+
+    ## Responsibilities
+    - Calculates fare estimates before order creation (for user preview)
+    - Calculates final fare after trip completion (for billing)
+    - Applies surge pricing multipliers based on demand/supply
+    - Applies promo/voucher discount (reads promo codes, deducts from fare)
+    - Supports different fare models: ride, delivery, food delivery
+
+    ## Fare Models
+
+    ### Ride
+    ```
+    base_fare + (distance_km × per_km_rate) + (duration_min × per_min_rate)
+    + booking_fee + service_fee − promo_discount
+    ```
+    Surge applied to the subtotal when surge_multiplier > 1.0.
+
+    ### Delivery
+    ```
+    base_fare + (distance_km × per_km_rate) + weight_surcharge
+    + insurance_fee (if is_fragile or insurance_value > 0)
+    + booking_fee − promo_discount
+    ```
+
+    ### Food Delivery
+    ```
+    food_subtotal + delivery_fee + service_fee + small_order_fee (if subtotal < threshold)
+    − promo_discount (either free delivery or % off food)
+    ```
+
+    ## Surge Pricing
+    - Surge multiplier stored in Redis `pricing:surge:{zone_id}` (TTL 5 min)
+    - Updated by a background job monitoring supply/demand ratio
+    - Zones aligned with geofence zones from Geo Service
+
+    ## Storage
+    - **PostgreSQL**: fare_rules table (base_fare, per_km_rate, per_min_rate per service_type and zone)
+    - **Redis**: `pricing:surge:{zone_id}` (surge multiplier cache)
+
+servers:
+  - url: http://clay-pricing-service:8080
+    description: Internal service
+
+tags:
+  - name: Estimate
+    description: Fare estimation before order
+  - name: Fare
+    description: Final fare calculation after trip
+  - name: Surge
+    description: Surge pricing information
+  - name: Internal
+    description: Service-to-service endpoints
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Estimate ──────────────────────────────────────────────────────────────
+
+  /estimate/ride:
+    post:
+      summary: Estimate ride fare
+      operationId: estimateRideFare
+      tags: [Estimate]
+      description: |
+        Pre-order fare estimate. Calls Geo Service to compute distance,
+        applies surge multiplier if applicable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RideEstimateRequest"
+      responses:
+        "200":
+          description: Ride fare estimate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RideFareEstimate"
+
+  /estimate/delivery:
+    post:
+      summary: Estimate delivery fare
+      operationId: estimateDeliveryFare
+      tags: [Estimate]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeliveryEstimateRequest"
+      responses:
+        "200":
+          description: Delivery fare estimate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeliveryFareEstimate"
+
+  /estimate/food:
+    post:
+      summary: Estimate food delivery fee
+      operationId: estimateFoodFare
+      tags: [Estimate]
+      description: Estimates the delivery fee component only. Food item prices come from Merchant Service.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FoodEstimateRequest"
+      responses:
+        "200":
+          description: Food delivery fee estimate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FoodFareEstimate"
+
+  # ── Surge ─────────────────────────────────────────────────────────────────
+
+  /surge:
+    get:
+      summary: Get current surge multiplier for a location
+      operationId: getSurge
+      tags: [Surge]
+      parameters:
+        - name: lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: lng
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: service_type
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/ServiceType"
+      responses:
+        "200":
+          description: Current surge data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SurgeResponse"
+
+  # ── Fare (post-trip) ──────────────────────────────────────────────────────
+
+  /fare/calculate:
+    post:
+      summary: Calculate final fare after trip completion
+      operationId: calculateFinalFare
+      tags: [Fare]
+      description: |
+        Called by order services after trip ends with actual distance/duration.
+        Returns final amount used for payment deduction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FinalFareRequest"
+      responses:
+        "200":
+          description: Final fare breakdown
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FinalFareResponse"
+
+  # ── Internal ──────────────────────────────────────────────────────────────
+
+  /internal/fare-rules:
+    get:
+      summary: Get fare rules for a service type and zone
+      operationId: getFareRules
+      tags: [Internal]
+      parameters:
+        - name: service_type
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/ServiceType"
+        - name: zone_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Fare rules
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FareRulesResponse"
+
+components:
+  schemas:
+    # ── Enums ────────────────────────────────────────────────────────────────
+
+    ServiceType:
+      type: string
+      enum: [ride, delivery, food]
+
+    VehicleType:
+      type: string
+      enum: [motorcycle, car]
+
+    # ── Estimate Requests ─────────────────────────────────────────────────────
+
+    RideEstimateRequest:
+      type: object
+      required: [pickup_lat, pickup_lng, dest_lat, dest_lng, vehicle_type]
+      properties:
+        pickup_lat:
+          type: number
+          format: double
+        pickup_lng:
+          type: number
+          format: double
+        dest_lat:
+          type: number
+          format: double
+        dest_lng:
+          type: number
+          format: double
+        vehicle_type:
+          $ref: "#/components/schemas/VehicleType"
+        promo_code:
+          type: string
+          nullable: true
+
+    DeliveryEstimateRequest:
+      type: object
+      required: [pickup_lat, pickup_lng, dest_lat, dest_lng, weight_kg]
+      properties:
+        pickup_lat:
+          type: number
+          format: double
+        pickup_lng:
+          type: number
+          format: double
+        dest_lat:
+          type: number
+          format: double
+        dest_lng:
+          type: number
+          format: double
+        weight_kg:
+          type: number
+          format: double
+        is_fragile:
+          type: boolean
+          default: false
+        insurance_value:
+          type: integer
+          description: IDR value for insurance calculation
+          default: 0
+        promo_code:
+          type: string
+          nullable: true
+
+    FoodEstimateRequest:
+      type: object
+      required: [restaurant_lat, restaurant_lng, dest_lat, dest_lng, food_subtotal]
+      properties:
+        restaurant_lat:
+          type: number
+          format: double
+        restaurant_lng:
+          type: number
+          format: double
+        dest_lat:
+          type: number
+          format: double
+        dest_lng:
+          type: number
+          format: double
+        food_subtotal:
+          type: integer
+          description: Total food item cost in IDR (for small order fee check)
+        promo_code:
+          type: string
+          nullable: true
+
+    # ── Estimate Responses ────────────────────────────────────────────────────
+
+    RideFareEstimate:
+      type: object
+      properties:
+        base_fare:
+          type: integer
+          description: IDR
+        distance_fare:
+          type: integer
+        duration_fare:
+          type: integer
+        booking_fee:
+          type: integer
+        service_fee:
+          type: integer
+        surge_multiplier:
+          type: number
+          format: double
+          description: 1.0 = no surge
+        surge_amount:
+          type: integer
+          description: Additional amount due to surge
+        promo_discount:
+          type: integer
+        total_fare:
+          type: integer
+        distance_km:
+          type: number
+          format: double
+        estimated_duration_min:
+          type: integer
+
+    DeliveryFareEstimate:
+      type: object
+      properties:
+        base_fare:
+          type: integer
+        distance_fare:
+          type: integer
+        weight_surcharge:
+          type: integer
+        insurance_fee:
+          type: integer
+        booking_fee:
+          type: integer
+        promo_discount:
+          type: integer
+        total_fare:
+          type: integer
+        distance_km:
+          type: number
+          format: double
+
+    FoodFareEstimate:
+      type: object
+      properties:
+        delivery_fee:
+          type: integer
+        service_fee:
+          type: integer
+        small_order_fee:
+          type: integer
+          description: Applied when food_subtotal < threshold (default 20000 IDR)
+        promo_discount:
+          type: integer
+        promo_type:
+          type: string
+          enum: [free_delivery, percentage_off, fixed_off]
+          nullable: true
+        total_delivery_charge:
+          type: integer
+        distance_km:
+          type: number
+          format: double
+
+    # ── Surge ─────────────────────────────────────────────────────────────────
+
+    SurgeResponse:
+      type: object
+      properties:
+        zone_id:
+          type: string
+          format: uuid
+          nullable: true
+        zone_name:
+          type: string
+          nullable: true
+        multiplier:
+          type: number
+          format: double
+          description: 1.0 = normal, 2.0 = 2x surge
+        is_surge:
+          type: boolean
+        reason:
+          type: string
+          nullable: true
+          example: "High demand in your area"
+        valid_until:
+          type: string
+          format: date-time
+          nullable: true
+
+    # ── Final Fare ────────────────────────────────────────────────────────────
+
+    FinalFareRequest:
+      type: object
+      required: [order_id, service_type, actual_distance_km, actual_duration_min]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        service_type:
+          $ref: "#/components/schemas/ServiceType"
+        actual_distance_km:
+          type: number
+          format: double
+        actual_duration_min:
+          type: integer
+        vehicle_type:
+          $ref: "#/components/schemas/VehicleType"
+        weight_kg:
+          type: number
+          format: double
+          description: For delivery orders
+        insurance_value:
+          type: integer
+          description: For delivery orders
+        is_fragile:
+          type: boolean
+          description: For delivery orders
+        food_subtotal:
+          type: integer
+          description: For food orders
+        promo_code:
+          type: string
+          nullable: true
+        pickup_lat:
+          type: number
+          format: double
+        pickup_lng:
+          type: number
+          format: double
+
+    FinalFareResponse:
+      type: object
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        breakdown:
+          $ref: "#/components/schemas/FareBreakdown"
+        total_amount:
+          type: integer
+          description: Final amount to charge in IDR
+
+    FareBreakdown:
+      type: object
+      properties:
+        base_fare:
+          type: integer
+        distance_fare:
+          type: integer
+        duration_fare:
+          type: integer
+          nullable: true
+        weight_surcharge:
+          type: integer
+          nullable: true
+        insurance_fee:
+          type: integer
+          nullable: true
+        delivery_fee:
+          type: integer
+          nullable: true
+        service_fee:
+          type: integer
+        booking_fee:
+          type: integer
+        surge_amount:
+          type: integer
+          nullable: true
+        small_order_fee:
+          type: integer
+          nullable: true
+        promo_discount:
+          type: integer
+        subtotal:
+          type: integer
+        total:
+          type: integer
+
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    FareRulesResponse:
+      type: object
+      properties:
+        service_type:
+          $ref: "#/components/schemas/ServiceType"
+        zone_id:
+          type: string
+          format: uuid
+          nullable: true
+        base_fare:
+          type: integer
+        per_km_rate:
+          type: integer
+        per_min_rate:
+          type: integer
+          nullable: true
+        booking_fee:
+          type: integer
+        service_fee_pct:
+          type: number
+          format: double
+          description: Service fee as fraction of subtotal (e.g., 0.05 = 5%)
+        min_fare:
+          type: integer
+        weight_rate_per_kg:
+          type: integer
+          nullable: true
+        small_order_threshold:
+          type: integer
+          nullable: true
+        small_order_fee:
+          type: integer
+          nullable: true
+
+    # ── Common ────────────────────────────────────────────────────────────────
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string

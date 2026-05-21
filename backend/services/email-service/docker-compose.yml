@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  redis-email:
+    image: redis:7-alpine
+    container_name: clay_email_redis
+    ports:
+      - "6373:6379"
+
+  adminer:
+    image: adminer
+    container_name: clay_email_adminer
+    restart: always
+    ports:
+      - "9003:8080"

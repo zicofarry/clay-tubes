@@ -1,0 +1,403 @@
+openapi: 3.0.3
+info:
+  title: Clay Push Service API
+  description: |
+    Low-level service responsible for actually delivering push notifications
+    to devices via APNs (iOS) and FCM (Android).
+
+    Acts as an abstraction layer over external push notification providers.
+    It does not know about "templates", "user preferences", or "business logic".
+    It just receives a request with a device token and a payload, and sends it.
+
+    **Internal Only:**
+    This service is **NOT** exposed to the public API Gateway. It is strictly
+    an internal infrastructure service called by the `Notification Service`.
+
+    **Supported Providers:**
+    - FCM (Firebase Cloud Messaging) for Android and Web
+    - APNs (Apple Push Notification service) for iOS
+  version: 1.0.0
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://localhost:8014/api/v1
+    description: Internal network
+
+tags:
+  - name: Delivery
+    description: Send push notifications
+  - name: Topic
+    description: Manage FCM topics (for broadcasts)
+
+paths:
+  /internal/push/send:
+    post:
+      operationId: sendPushNotification
+      tags: [Delivery]
+      summary: Send push notification to a specific device
+      description: |
+        Delivers a push payload to a single device token using FCM or APNs.
+        Called by the Notification Service after it resolves user preferences.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendPushRequest'
+      responses:
+        '200':
+          description: Push delivered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PushDeliveryResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '410':
+          description: Device token is invalid or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: Upstream provider (FCM/APNs) error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/push/send-batch:
+    post:
+      operationId: sendBatchPushNotification
+      tags: [Delivery]
+      summary: Send push notification to multiple devices
+      description: |
+        Delivers a push payload to multiple device tokens (up to 500 per batch).
+        Useful when a user has multiple active devices, or for small targeted blasts.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendBatchPushRequest'
+      responses:
+        '200':
+          description: Batch delivery report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchPushDeliveryResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+  /internal/push/topics/{topicName}/subscribe:
+    post:
+      operationId: subscribeToTopic
+      tags: [Topic]
+      summary: Subscribe device tokens to an FCM topic
+      description: |
+        Subscribes one or more device tokens to a topic (e.g., `driver_bandung`, `promo_all`).
+        Allows for efficient broadcast notifications later.
+      parameters:
+        - $ref: '#/components/parameters/TopicNamePath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tokens]
+              properties:
+                tokens:
+                  type: array
+                  items:
+                    type: string
+                  description: List of FCM tokens to subscribe
+      responses:
+        '200':
+          description: Subscribed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopicSubscriptionResponse'
+
+  /internal/push/topics/{topicName}/unsubscribe:
+    post:
+      operationId: unsubscribeFromTopic
+      tags: [Topic]
+      summary: Unsubscribe device tokens from an FCM topic
+      parameters:
+        - $ref: '#/components/parameters/TopicNamePath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tokens]
+              properties:
+                tokens:
+                  type: array
+                  items:
+                    type: string
+                  description: List of FCM tokens to unsubscribe
+      responses:
+        '200':
+          description: Unsubscribed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopicSubscriptionResponse'
+
+  /internal/push/topics/{topicName}/send:
+    post:
+      operationId: sendTopicPushNotification
+      tags: [Topic]
+      summary: Send a push notification to an entire topic
+      description: |
+        Broadcasts a message to all devices subscribed to the specified topic.
+        Very efficient for mass announcements (e.g., global promos).
+      parameters:
+        - $ref: '#/components/parameters/TopicNamePath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendTopicPushRequest'
+      responses:
+        '200':
+          description: Message dispatched to topic
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    properties:
+                      message_id:
+                        type: string
+                        description: Upstream provider message ID
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: clay-push-service
+                  providers:
+                    type: object
+                    properties:
+                      fcm:
+                        type: string
+                        example: connected
+                      apns:
+                        type: string
+                        example: connected
+                  timestamp:
+                    type: string
+                    format: date-time
+
+components:
+  parameters:
+    TopicNamePath:
+      name: topicName
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: '^[a-zA-Z0-9-_]+$'
+      description: Topic identifier (e.g., promo_bandung)
+
+  schemas:
+    # ── Common Payload ──
+    PushPayload:
+      type: object
+      required: [title, body]
+      properties:
+        title:
+          type: string
+          example: "Driver sedang menuju ke kamu"
+        body:
+          type: string
+          example: "Budi Santoso (D 1234 ABC) akan tiba dalam 3 menit"
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+          description: Optional image to show in rich push notification
+        data:
+          type: object
+          nullable: true
+          description: Hidden data payload for the app to process (e.g., deep links)
+          example:
+            order_id: "ord_x9y8z7-..."
+            action: "open_order_tracking"
+        ttl_seconds:
+          type: integer
+          default: 3600
+          description: Time-To-Live in seconds before provider drops the message if undelivered
+
+    # ── Requests ──
+    SendPushRequest:
+      type: object
+      required: [token, platform, payload]
+      properties:
+        token:
+          type: string
+          description: FCM or APNs device token
+        platform:
+          type: string
+          enum: [ios, android, web]
+        payload:
+          $ref: '#/components/schemas/PushPayload'
+
+    SendBatchPushRequest:
+      type: object
+      required: [tokens, payload]
+      properties:
+        tokens:
+          type: array
+          maxItems: 500
+          items:
+            type: object
+            required: [token, platform]
+            properties:
+              token:
+                type: string
+              platform:
+                type: string
+                enum: [ios, android, web]
+        payload:
+          $ref: '#/components/schemas/PushPayload'
+
+    SendTopicPushRequest:
+      type: object
+      required: [payload]
+      properties:
+        payload:
+          $ref: '#/components/schemas/PushPayload'
+
+    # ── Responses ──
+    PushDeliveryResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            message_id:
+              type: string
+              description: ID returned by FCM/APNs
+            provider:
+              type: string
+              enum: [fcm, apns]
+
+    BatchPushDeliveryResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            total:
+              type: integer
+            success_count:
+              type: integer
+            failure_count:
+              type: integer
+            results:
+              type: array
+              items:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  status:
+                    type: string
+                    enum: [success, error]
+                  error:
+                    type: string
+                    nullable: true
+                    description: Will contain "InvalidRegistration" if token is bad
+
+    TopicSubscriptionResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            success_count:
+              type: integer
+            failure_count:
+              type: integer
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+  responses:
+    ValidationError:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'

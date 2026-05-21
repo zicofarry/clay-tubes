@@ -1,0 +1,456 @@
+openapi: "3.0.3"
+info:
+  title: Clay Tracking Service
+  version: "1.0.0"
+  description: |
+    Real-time order tracking and route management for Clay superapp.
+
+    ## Responsibilities
+    - Provides real-time driver position stream to user app (WebSocket / SSE)
+    - Calculates ETA from current driver position to pickup/destination
+    - Records and stores trip route polylines
+    - Integrates with Google Maps Directions API for route calculation
+    - Stores completed trip routes in MongoDB (variable-length polyline data)
+
+    ## Storage
+    - **Redis**: `tracking:order:{order_id}` (Hash, TTL = order active duration)
+      - Stores: driver_id, current lat/lng, bearing, eta_minutes, last_updated
+    - **MongoDB** (`trip_routes` collection): completed route polylines per trip
+      - Document per order_id, array of {lat, lng, timestamp} points
+
+    ## Real-time Delivery
+    - WebSocket endpoint `/tracking/orders/{orderId}/stream` for live updates
+    - Polling fallback via `GET /tracking/orders/{orderId}/position`
+    - Driver app pushes location to Geo Service → Kafka `driver.location.updated`
+    - Tracking Service consumes Kafka event, updates Redis, pushes to WebSocket clients
+
+    ## Kafka Events
+    ### Consumed
+    - `driver.location.updated` → update Redis tracking state, broadcast to subscribers
+    - `order.status.updated` → start/stop tracking session
+
+servers:
+  - url: http://clay-tracking-service:8080
+    description: Tracking service (WebSocket + REST)
+
+tags:
+  - name: Tracking
+    description: Real-time order position and ETA
+  - name: Route
+    description: Trip route history and polyline
+  - name: Internal
+    description: Service-to-service endpoints
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Tracking ──────────────────────────────────────────────────────────────
+
+  /tracking/orders/{orderId}/position:
+    get:
+      summary: Get current driver position for an active order
+      operationId: getOrderPosition
+      tags: [Tracking]
+      description: |
+        Polling endpoint. Returns the latest driver position from Redis cache.
+        For real-time updates, use the WebSocket stream endpoint.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: Current driver position
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderPosition"
+        "404":
+          description: No active tracking session for this order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /tracking/orders/{orderId}/eta:
+    get:
+      summary: Get estimated time of arrival
+      operationId: getOrderETA
+      tags: [Tracking]
+      description: |
+        Calculates ETA based on current driver position and the next waypoint.
+        - Before pickup: ETA to pickup location
+        - After pickup (on_trip/on_delivery): ETA to destination
+        Calls Google Maps Directions API for live traffic-aware ETA.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: ETA result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ETAResponse"
+        "404":
+          description: Order not found or not in trackable state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /tracking/orders/{orderId}/route:
+    get:
+      summary: Get suggested route polyline
+      operationId: getOrderRoute
+      tags: [Route]
+      description: |
+        Returns the turn-by-turn route from driver current position to the next waypoint.
+        Uses Google Maps Directions API. Refreshed every 30s for active orders.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: Route polyline
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteResponse"
+        "404":
+          description: Order not found or not active
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /routes/{orderId}:
+    get:
+      summary: Get completed trip route history
+      operationId: getTripRoute
+      tags: [Route]
+      description: |
+        Returns the full recorded GPS trace of a completed trip from MongoDB.
+        Available after order status reaches `completed` or `delivered`.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: Completed trip route
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TripRouteResponse"
+        "404":
+          description: Route not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Internal ──────────────────────────────────────────────────────────────
+
+  /internal/tracking/start:
+    post:
+      summary: Start a tracking session for an order
+      operationId: startTracking
+      tags: [Internal]
+      description: |
+        Called by order services when driver is assigned.
+        Initializes the Redis tracking hash for the order.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StartTrackingRequest"
+      responses:
+        "201":
+          description: Tracking session started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /internal/tracking/{orderId}/stop:
+    post:
+      summary: Stop tracking and archive trip route
+      operationId: stopTracking
+      tags: [Internal]
+      description: |
+        Called by order services when order reaches terminal state.
+        Flushes Redis tracking data to MongoDB trip_routes collection.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: Tracking stopped and route archived
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /internal/tracking/{orderId}/update:
+    put:
+      summary: Push a new location point to tracking stream
+      operationId: pushLocationUpdate
+      tags: [Internal]
+      description: |
+        Called by the Kafka consumer (internal) when `driver.location.updated` event is received.
+        Updates Redis and broadcasts to WebSocket subscribers.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LocationUpdateEvent"
+      responses:
+        "200":
+          description: Update broadcasted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "404":
+          description: No active tracking session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  parameters:
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    # ── Tracking ──────────────────────────────────────────────────────────────
+
+    OrderPosition:
+      type: object
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        driver_id:
+          type: string
+          format: uuid
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        bearing:
+          type: number
+          format: double
+          description: Direction of travel in degrees (0–360)
+        speed_kmh:
+          type: number
+          format: double
+        eta_minutes:
+          type: integer
+          description: ETA to next waypoint in minutes
+        updated_at:
+          type: string
+          format: date-time
+
+    ETAResponse:
+      type: object
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        waypoint:
+          type: string
+          enum: [pickup, destination]
+          description: Which waypoint the ETA is for
+        eta_minutes:
+          type: integer
+        eta_at:
+          type: string
+          format: date-time
+        distance_km:
+          type: number
+          format: double
+        traffic_condition:
+          type: string
+          enum: [light, moderate, heavy]
+
+    # ── Route ─────────────────────────────────────────────────────────────────
+
+    RouteResponse:
+      type: object
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        origin:
+          $ref: "#/components/schemas/LatLng"
+        destination:
+          $ref: "#/components/schemas/LatLng"
+        waypoint:
+          type: string
+          enum: [pickup, destination]
+        polyline:
+          type: string
+          description: Encoded polyline string (Google Maps format)
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteStep"
+        total_distance_km:
+          type: number
+          format: double
+        total_duration_minutes:
+          type: integer
+
+    RouteStep:
+      type: object
+      properties:
+        instruction:
+          type: string
+          example: "Turn right onto Jl. Buah Batu"
+        distance_m:
+          type: integer
+        duration_seconds:
+          type: integer
+        start_lat:
+          type: number
+          format: double
+        start_lng:
+          type: number
+          format: double
+
+    TripRouteResponse:
+      type: object
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        points:
+          type: array
+          items:
+            $ref: "#/components/schemas/RoutePoint"
+        total_distance_km:
+          type: number
+          format: double
+        duration_minutes:
+          type: integer
+        started_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+
+    RoutePoint:
+      type: object
+      properties:
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        timestamp:
+          type: string
+          format: date-time
+
+    # ── Internal ──────────────────────────────────────────────────────────────
+
+    StartTrackingRequest:
+      type: object
+      required: [order_id, driver_id, pickup_lat, pickup_lng, destination_lat, destination_lng]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+        driver_id:
+          type: string
+          format: uuid
+        pickup_lat:
+          type: number
+          format: double
+        pickup_lng:
+          type: number
+          format: double
+        destination_lat:
+          type: number
+          format: double
+        destination_lng:
+          type: number
+          format: double
+
+    LocationUpdateEvent:
+      type: object
+      required: [driver_id, lat, lng]
+      properties:
+        driver_id:
+          type: string
+          format: uuid
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        bearing:
+          type: number
+          format: double
+        speed_kmh:
+          type: number
+          format: double
+        timestamp:
+          type: string
+          format: date-time
+
+    # ── Shared ────────────────────────────────────────────────────────────────
+
+    LatLng:
+      type: object
+      properties:
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string

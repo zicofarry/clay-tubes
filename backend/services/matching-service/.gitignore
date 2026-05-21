@@ -1,0 +1,25 @@
+# Binaries
+bin/
+matching-service
+clay-matching-service
+
+# Test artifacts
+*.out
+coverage.txt
+*.test
+
+# Go
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env
+.env
+.env.local

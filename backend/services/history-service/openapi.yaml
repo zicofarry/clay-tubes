@@ -1,0 +1,1096 @@
+openapi: 3.0.3
+info:
+  title: Clay History Service API
+  description: |
+    Centralized order history and user activity feed for the Clay platform.
+    This is a **read-heavy, eventually consistent** service — data is populated
+    asynchronously via Kafka events, not by direct user actions.
+
+    **Database:**
+    - PostgreSQL — denormalized order history and activity feed
+
+    **Kafka Events Consumed:**
+    - `Trip_Completed` → inserts into `order_history` with final trip data
+    - `Order_Success` → updates `order_history` with payment settlement status
+    - `Order_Cancelled` → inserts into `order_history` with `cancelled` status
+    - `Refund_Triggered` → inserts activity feed entry for refund
+    - All of the above also generate `activity_feed` entries
+
+    **Design Rationale:**
+    Order history is intentionally denormalized (copied from Order/Payment services)
+    so that this service can serve history queries independently without
+    cross-service joins. This enables fast reads and isolates the history
+    workload from the transactional order services.
+
+    **Data Flow:**
+    ```
+    Trip_Completed (Kafka) ──→ History Consumer ──→ INSERT order_history
+                                                  ──→ INSERT activity_feed
+    ```
+  version: 1.0.0
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://localhost:3015/api/v1
+    description: Local development
+  - url: https://api.clay.id/history/v1
+    description: Production (via API Gateway)
+
+tags:
+  - name: Order History
+    description: Past order records (completed, cancelled)
+  - name: Transaction History
+    description: Financial transaction records (payments, refunds, top-ups)
+  - name: Activity Feed
+    description: User activity timeline (orders, refunds, promos, etc.)
+  - name: Driver History
+    description: Driver-facing trip history and earnings summary
+  - name: Internal
+    description: Internal endpoints (event consumers, not exposed to public)
+
+paths:
+  # ─────────────────────────── Order History ───────────────────────────
+  /history/orders:
+    get:
+      operationId: listMyOrderHistory
+      tags: [Order History]
+      summary: List past orders for the authenticated user
+      description: |
+        Returns completed and cancelled orders sorted by newest first.
+        Supports filtering by order type, status, and date range.
+        This is the data source for the "Riwayat" / "History" tab in the user app.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: order_type
+          in: query
+          description: Filter by order type
+          schema:
+            type: string
+            enum: [ride, food, delivery]
+          example: ride
+        - name: status
+          in: query
+          description: Filter by final status
+          schema:
+            type: string
+            enum: [completed, cancelled]
+        - name: from
+          in: query
+          description: Start date (inclusive)
+          schema:
+            type: string
+            format: date
+          example: "2025-03-01"
+        - name: to
+          in: query
+          description: End date (inclusive)
+          schema:
+            type: string
+            format: date
+          example: "2025-04-01"
+        - name: service_type
+          in: query
+          description: Specific service within order type
+          schema:
+            type: string
+          example: goride
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Paginated order history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderHistoryListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /history/orders/{orderId}:
+    get:
+      operationId: getOrderHistoryDetail
+      tags: [Order History]
+      summary: Get detailed history for a single order
+      description: |
+        Returns the full denormalized order record including fare,
+        route, payment method, and rating. This is the "Order Detail"
+        screen in the user app's history tab.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderIdPath'
+      responses:
+        '200':
+          description: Order history detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderHistoryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Order not found in history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /history/orders/stats:
+    get:
+      operationId: getMyOrderStats
+      tags: [Order History]
+      summary: Get order statistics summary
+      description: |
+        Returns aggregated stats for the authenticated user:
+        total orders, total spent, orders by type, etc.
+        Useful for profile screens and loyalty program calculations.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: from
+          in: query
+          description: Stats start date
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          description: Stats end date
+          schema:
+            type: string
+            format: date
+      responses:
+        '200':
+          description: Order statistics
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderStatsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─────────────────────────── Transaction History ───────────────────────────
+  /history/transactions:
+    get:
+      operationId: listMyTransactionHistory
+      tags: [Transaction History]
+      summary: List financial transaction history
+      description: |
+        Returns all financial transactions for the authenticated user:
+        payments, refunds, top-ups, transfers, and settlements.
+        Data is denormalized from Payment and Wallet services.
+        This powers the "Riwayat Transaksi" screen in the user app.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: type
+          in: query
+          description: Filter by transaction type
+          schema:
+            type: string
+            enum: [payment, refund, topup, transfer_in, transfer_out, settlement]
+        - name: from
+          in: query
+          description: Start date (inclusive)
+          schema:
+            type: string
+            format: date
+          example: "2025-03-01"
+        - name: to
+          in: query
+          description: End date (inclusive)
+          schema:
+            type: string
+            format: date
+          example: "2025-04-01"
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Paginated transaction history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionHistoryListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /history/transactions/{transactionId}:
+    get:
+      operationId: getTransactionHistoryDetail
+      tags: [Transaction History]
+      summary: Get detail of a single transaction
+      description: |
+        Returns full transaction detail including related order info,
+        amount, payment method, and status.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TransactionIdPath'
+      responses:
+        '200':
+          description: Transaction detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransactionHistoryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Transaction not found in history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Activity Feed ───────────────────────────
+  /feed:
+    get:
+      operationId: getMyActivityFeed
+      tags: [Activity Feed]
+      summary: Get user's activity feed
+      description: |
+        Returns a chronological feed of all user activities:
+        completed trips, cancelled orders, refunds, promo redemptions, etc.
+        This powers the "Activity" or "Notification" tab in the user app.
+
+        Feed entries are generated from Kafka events and are read-only.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: event_type
+          in: query
+          description: Filter by specific event type
+          schema:
+            type: string
+          example: trip_completed
+        - name: before
+          in: query
+          description: |
+            Cursor — return entries older than this ID.
+            Omit to get the latest entries. Used for infinite scroll.
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Activity feed entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityFeedListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /feed/{feedId}:
+    get:
+      operationId: getActivityFeedEntry
+      tags: [Activity Feed]
+      summary: Get a single activity feed entry
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: feedId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Activity feed entry UUID
+      responses:
+        '200':
+          description: Feed entry detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityFeedResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Feed entry not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Driver History ───────────────────────────
+  /driver/history/orders:
+    get:
+      operationId: listDriverTripHistory
+      tags: [Driver History]
+      summary: List trip history for the authenticated driver
+      description: |
+        Returns completed and cancelled trips from the driver's perspective.
+        Includes fare breakdown with net earnings (after platform fee).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: order_type
+          in: query
+          schema:
+            type: string
+            enum: [ride, food, delivery]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [completed, cancelled]
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Driver trip history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderHistoryListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: User is not a driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /driver/history/earnings:
+    get:
+      operationId: getDriverEarnings
+      tags: [Driver History]
+      summary: Get driver earnings summary
+      description: |
+        Returns aggregated earnings for the authenticated driver:
+        total gross, total net, platform fees, trip count.
+        Grouped by day/week/month based on `group_by` parameter.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          example: "2025-04-01"
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+          example: "2025-04-30"
+        - name: group_by
+          in: query
+          description: Group earnings by time period
+          schema:
+            type: string
+            enum: [day, week, month]
+            default: day
+      responses:
+        '200':
+          description: Earnings summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriverEarningsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: User is not a driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Internal ───────────────────────────
+  /internal/history/sync:
+    post:
+      operationId: internalSyncOrderHistory
+      tags: [Internal]
+      summary: Sync completed/cancelled order data to history store
+      description: |
+        Called by the Kafka consumer handler when a `Trip_Completed` or
+        `Order_Cancelled` event is received. Creates a denormalized
+        order history record and corresponding activity feed entry.
+
+        **Idempotent:** If an order_id already exists, returns 200
+        with the existing record instead of inserting a duplicate.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalCreateOrderHistoryRequest'
+      responses:
+        '201':
+          description: Order history created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderHistoryResponse'
+        '200':
+          description: Order history already exists (idempotent)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderHistoryResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+  /internal/feed:
+    post:
+      operationId: internalCreateFeedEntry
+      tags: [Internal]
+      summary: Insert activity feed entry (Kafka consumer)
+      description: |
+        Creates an activity feed entry for any event type.
+        Can be called by any Kafka consumer handler to log user-visible events.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalCreateFeedEntryRequest'
+      responses:
+        '201':
+          description: Feed entry created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityFeedResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+  /internal/history/orders/{orderId}:
+    patch:
+      operationId: internalUpdateOrderHistory
+      tags: [Internal]
+      summary: Update order history record (e.g., add rating after the fact)
+      description: |
+        Called when supplementary data arrives after the initial record was
+        created. Common use case: rating is submitted hours after trip completion.
+      parameters:
+        - $ref: '#/components/parameters/OrderIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rating_score:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                  example: 5
+                fare_total:
+                  type: number
+                  description: Updated fare if recalculated
+                payment_method:
+                  type: string
+      responses:
+        '200':
+          description: Order history updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrderHistoryResponse'
+        '404':
+          description: Order not found in history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Health ───────────────────────────
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: clay-history-service
+                  timestamp:
+                    type: string
+                    format: date-time
+
+# ═══════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token (15 min TTL)
+
+  parameters:
+    OrderIdPath:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Order UUID (matches original order ID from Order Service)
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 50
+    TransactionIdPath:
+      name: transactionId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Transaction UUID
+
+  schemas:
+    # ── Request Schemas ───────────────────────────────────────────
+    InternalCreateOrderHistoryRequest:
+      type: object
+      required: [order_id, user_id, order_type, final_status]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+          example: "ord_x9y8z7-..."
+        user_id:
+          type: string
+          format: uuid
+          example: "usr_abc123-..."
+        driver_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null for cancelled orders before driver assignment
+          example: "drv_m1n2o3-..."
+        order_type:
+          type: string
+          enum: [ride, food, delivery]
+          example: ride
+        service_type:
+          type: string
+          description: Specific service (goride, gocar, gofood, gosend)
+          example: goride
+        final_status:
+          type: string
+          enum: [completed, cancelled]
+          example: completed
+        origin_address:
+          type: string
+          example: "Jl. Braga No.1, Bandung"
+        dest_address:
+          type: string
+          example: "Jl. Dago No.5, Bandung"
+        fare_total:
+          type: number
+          nullable: true
+          description: Final fare amount. Null for cancelled before pricing.
+          example: 16000
+        payment_method:
+          type: string
+          example: gopay
+        rating_score:
+          type: integer
+          minimum: 1
+          maximum: 5
+          nullable: true
+          description: User's rating for the trip. Null if not yet rated.
+          example: 5
+        completed_at:
+          type: string
+          format: date-time
+          description: When the order reached its final state
+          example: "2025-04-01T10:55:00Z"
+
+    InternalCreateFeedEntryRequest:
+      type: object
+      required: [user_id, event_type, title]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+          example: "usr_abc123-..."
+        event_type:
+          type: string
+          description: |
+            Type of activity event. Common values:
+            `trip_completed`, `order_cancelled`, `refund_received`,
+            `promo_applied`, `rating_submitted`, `payment_settled`
+          example: trip_completed
+        title:
+          type: string
+          maxLength: 200
+          description: Human-readable title shown in the feed
+          example: "Perjalanan selesai — GoRide ke Jl. Dago"
+        description:
+          type: string
+          nullable: true
+          description: Additional detail or subtitle
+          example: "Rp16.000 · 3.2 km · 18 menit"
+        order_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Link to related order (for deep linking in the app)
+          example: "ord_x9y8z7-..."
+        metadata:
+          type: object
+          nullable: true
+          description: |
+            Arbitrary key-value data for client rendering.
+            Can include icon type, action URL, amount, etc.
+          example:
+            icon: "trip_complete"
+            fare_total: 16000
+            distance_km: 3.2
+            action_url: "/orders/ord_x9y8z7-..."
+
+    # ── Entity Schemas ────────────────────────────────────────────
+    OrderHistory:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+          description: Original order ID from the Order Service
+          example: "ord_x9y8z7-..."
+        user_id:
+          type: string
+          format: uuid
+          example: "usr_abc123-..."
+        driver_id:
+          type: string
+          format: uuid
+          nullable: true
+          example: "drv_m1n2o3-..."
+        order_type:
+          type: string
+          enum: [ride, food, delivery]
+          example: ride
+        service_type:
+          type: string
+          description: Specific service variant
+          example: goride
+        final_status:
+          type: string
+          enum: [completed, cancelled]
+          example: completed
+        origin_address:
+          type: string
+          example: "Jl. Braga No.1, Bandung"
+        dest_address:
+          type: string
+          example: "Jl. Dago No.5, Bandung"
+        fare_total:
+          type: number
+          nullable: true
+          example: 16000
+        payment_method:
+          type: string
+          example: gopay
+        rating_score:
+          type: integer
+          minimum: 1
+          maximum: 5
+          nullable: true
+          example: 5
+        completed_at:
+          type: string
+          format: date-time
+          example: "2025-04-01T10:55:00Z"
+
+    TransactionHistory:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+          example: "usr_abc123-..."
+        type:
+          type: string
+          enum: [payment, refund, topup, transfer_in, transfer_out, settlement]
+          example: payment
+        amount:
+          type: number
+          description: Transaction amount (always positive)
+          example: 16000
+        description:
+          type: string
+          example: "GoRide — Jl. Braga ke Jl. Dago"
+        order_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Related order ID (null for top-ups/transfers)
+          example: "ord_x9y8z7-..."
+        order_type:
+          type: string
+          enum: [ride, food, delivery]
+          nullable: true
+        payment_method:
+          type: string
+          example: gopay
+        status:
+          type: string
+          enum: [success, pending, failed]
+          example: success
+        reference_id:
+          type: string
+          nullable: true
+          description: Reference to original transaction in Payment/Wallet service
+        balance_after:
+          type: number
+          nullable: true
+          description: Wallet balance after this transaction (for GoPay)
+          example: 84000
+        created_at:
+          type: string
+          format: date-time
+          example: "2025-04-01T10:55:00Z"
+
+    ActivityFeedEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          example: trip_completed
+        title:
+          type: string
+          example: "Perjalanan selesai — GoRide ke Jl. Dago"
+        description:
+          type: string
+          nullable: true
+          example: "Rp16.000 · 3.2 km · 18 menit"
+        order_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Related order for deep linking
+        metadata:
+          type: object
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          example: "2025-04-01T10:55:30Z"
+
+    # ── Response Schemas ──────────────────────────────────────────
+    OrderHistoryResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/OrderHistory'
+
+    OrderHistoryListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrderHistory'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    TransactionHistoryResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/TransactionHistory'
+
+    TransactionHistoryListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/TransactionHistory'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    OrderStatsResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            total_orders:
+              type: integer
+              example: 142
+            total_completed:
+              type: integer
+              example: 135
+            total_cancelled:
+              type: integer
+              example: 7
+            total_spent:
+              type: number
+              description: Total fare across all completed orders
+              example: 2450000
+            by_type:
+              type: object
+              description: Order count grouped by type
+              properties:
+                ride:
+                  type: integer
+                  example: 89
+                food:
+                  type: integer
+                  example: 41
+                delivery:
+                  type: integer
+                  example: 12
+            average_rating_given:
+              type: number
+              description: Average rating the user gave to drivers
+              example: 4.6
+            period:
+              type: object
+              properties:
+                from:
+                  type: string
+                  format: date
+                  nullable: true
+                to:
+                  type: string
+                  format: date
+                  nullable: true
+
+    ActivityFeedResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/ActivityFeedEntry'
+
+    ActivityFeedListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActivityFeedEntry'
+        meta:
+          type: object
+          properties:
+            has_more:
+              type: boolean
+              description: Whether there are older entries to load
+              example: true
+            oldest_id:
+              type: string
+              format: uuid
+              description: ID of the oldest entry in this page (use as `before` cursor)
+            count:
+              type: integer
+              example: 20
+
+    DriverEarningsResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            total_trips:
+              type: integer
+              example: 45
+            total_gross:
+              type: number
+              description: Gross fare before platform fee
+              example: 3200000
+            total_platform_fee:
+              type: number
+              example: 640000
+            total_net:
+              type: number
+              description: Net earnings after platform fee
+              example: 2560000
+            average_per_trip:
+              type: number
+              description: Average net earnings per trip
+              example: 56888
+            breakdown:
+              type: array
+              description: Earnings grouped by the requested period
+              items:
+                type: object
+                properties:
+                  period:
+                    type: string
+                    description: Date string or period label
+                    example: "2025-04-01"
+                  trips:
+                    type: integer
+                    example: 6
+                  gross:
+                    type: number
+                    example: 420000
+                  platform_fee:
+                    type: number
+                    example: 84000
+                  net:
+                    type: number
+                    example: 336000
+            period:
+              type: object
+              properties:
+                from:
+                  type: string
+                  format: date
+                to:
+                  type: string
+                  format: date
+                group_by:
+                  type: string
+                  enum: [day, week, month]
+
+    # ── Common Schemas ────────────────────────────────────────────
+    PaginationMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 20
+        total:
+          type: integer
+        total_pages:
+          type: integer
+
+    MessageResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: ORDER_NOT_FOUND
+            message:
+              type: string
+              example: Order with the given ID was not found in history
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'

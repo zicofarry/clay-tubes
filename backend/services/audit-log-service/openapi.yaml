@@ -1,0 +1,774 @@
+openapi: "3.0.3"
+info:
+  title: Clay Audit Log Service
+  version: "1.0.0"
+  description: |
+    Centralized, append-only audit trail for all significant actions across
+    the Clay platform. Used for compliance, debugging, and admin investigation.
+
+    ## Responsibilities
+    - Records every significant state change across all services
+    - Provides searchable audit trail for admin/security investigations
+    - Immutable — logs are never updated or deleted (compliance requirement)
+    - Supports export for regulatory reporting
+
+    ## Storage
+    - **MongoDB**: `audit_logs` collection (append-only, TTL index = 1 year)
+    - **Retention**: 1 year via MongoDB TTL index on `created_at`
+
+    ## Kafka Events Consumed
+    All services publish audit events to `audit.log` topic. Examples:
+    - `auth.login_success` / `auth.login_failed`
+    - `user.profile_updated` / `user.address_created`
+    - `order.created` / `order.cancelled` / `order.completed`
+    - `payment.charged` / `payment.refunded`
+    - `merchant.menu_updated` / `merchant.status_changed`
+    - `security.user_flagged` / `security.ip_blocked`
+    - `admin.user_suspended` / `admin.refund_approved`
+
+    ## Event Payload Standard
+    All Kafka audit events must follow this structure:
+    ```json
+    {
+      "event_id": "uuid",
+      "service": "clay-ride-order-service",
+      "actor_id": "uuid",
+      "actor_type": "user | driver | admin | system",
+      "action": "resource.verb",
+      "resource_type": "order",
+      "resource_id": "uuid",
+      "old_value": { "status": "in_progress" },
+      "new_value": { "status": "cancelled" },
+      "ip_address": "103.28.14.52",
+      "metadata": { "user_agent": "Clay/2.4.1 (Android 14)", "request_id": "req_..." },
+      "timestamp": "2025-04-25T10:30:00Z"
+    }
+    ```
+
+    ## Access Control
+    - **Admin only** — all query endpoints require admin role
+    - **Internal** — write endpoint is service-to-service only (no public access)
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://clay-audit-log-service:8080
+    description: Audit log service (internal network)
+
+tags:
+  - name: Query
+    description: Search and retrieve audit logs (admin)
+  - name: Export
+    description: Export audit logs for compliance reporting (admin)
+  - name: Internal
+    description: Write endpoints (service-to-service via Kafka consumer)
+
+paths:
+  /health:
+    get:
+      summary: Service health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Query (Admin) ─────────────────────────────────────────────────────────
+
+  /admin/logs:
+    get:
+      summary: Search audit logs
+      operationId: searchAuditLogs
+      tags: [Query]
+      description: |
+        Full-text search across audit logs with powerful filtering.
+        Results are always sorted by newest first.
+
+        **Example queries:**
+        - "Who changed this user's profile?" → `resource_type=user&resource_id={userId}`
+        - "What did this admin do today?" → `actor_id={adminId}&from=2025-04-25`
+        - "All order cancellations this week" → `action=order.cancelled&from=2025-04-21`
+        - "All actions from this IP" → `ip_address=103.28.14.52`
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: actor_id
+          in: query
+          description: Filter by who performed the action
+          schema:
+            type: string
+            format: uuid
+        - name: actor_type
+          in: query
+          schema:
+            type: string
+            enum: [user, driver, admin, system]
+        - name: action
+          in: query
+          description: Filter by action (e.g., `order.cancelled`, `payment.refunded`)
+          schema:
+            type: string
+          example: order.cancelled
+        - name: resource_type
+          in: query
+          description: Filter by resource type (e.g., `order`, `user`, `payment`)
+          schema:
+            type: string
+          example: order
+        - name: resource_id
+          in: query
+          description: Filter by specific resource ID
+          schema:
+            type: string
+            format: uuid
+        - name: ip_address
+          in: query
+          description: Filter by source IP address
+          schema:
+            type: string
+          example: "103.28.14.52"
+        - name: from
+          in: query
+          description: Start date (inclusive)
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          description: End date (inclusive)
+          schema:
+            type: string
+            format: date-time
+        - name: q
+          in: query
+          description: Free-text search across action, resource_type, and changes
+          schema:
+            type: string
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Audit log search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Admin role required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/logs/{logId}:
+    get:
+      summary: Get a single audit log entry
+      operationId: getAuditLog
+      tags: [Query]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: logId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Audit log detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Log entry not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/logs/by-resource/{resourceType}/{resourceId}:
+    get:
+      summary: Get full audit trail for a specific resource
+      operationId: getResourceAuditTrail
+      tags: [Query]
+      description: |
+        Returns every action ever performed on a specific resource.
+        Useful for investigating "what happened to this order/user/payment?"
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: resourceType
+          in: path
+          required: true
+          schema:
+            type: string
+          example: order
+        - name: resourceId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Resource audit trail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/logs/by-actor/{actorId}:
+    get:
+      summary: Get all actions performed by a specific actor
+      operationId: getActorAuditTrail
+      tags: [Query]
+      description: |
+        Returns every action performed by a specific user, driver, or admin.
+        Useful for investigating user behavior or admin activity.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: actorId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Actor audit trail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/logs/stats:
+    get:
+      summary: Get audit log statistics
+      operationId: getAuditLogStats
+      tags: [Query]
+      description: |
+        Returns aggregated statistics: action counts by type, top actors,
+        most modified resources. Useful for admin dashboards.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date
+      responses:
+        "200":
+          description: Audit log statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogStatsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Export (Admin) ────────────────────────────────────────────────────────
+
+  /admin/logs/export:
+    post:
+      summary: Request audit log export
+      operationId: requestAuditLogExport
+      tags: [Export]
+      description: |
+        Initiates an async export job. Filters are the same as the search endpoint.
+        The export is generated as a CSV or JSON file and stored temporarily.
+        Poll `GET /admin/logs/export/{exportId}` to check status and get download URL.
+
+        **Max range:** 90 days per export.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExportRequest"
+      responses:
+        "202":
+          description: Export job started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportJobResponse"
+        "400":
+          description: Invalid date range or format
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/logs/export/{exportId}:
+    get:
+      summary: Check export job status and get download URL
+      operationId: getExportStatus
+      tags: [Export]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: exportId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Export job status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportJobResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Export job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Internal ──────────────────────────────────────────────────────────────
+
+  /internal/logs:
+    post:
+      summary: Write an audit log entry
+      operationId: internalCreateAuditLog
+      tags: [Internal]
+      description: |
+        Called by the Kafka consumer handler or directly by other services
+        to write an audit log entry. This is the **only write endpoint**.
+
+        **Idempotent:** If the same `(actor_id, action, resource_id, created_at)`
+        combination exists, the entry is silently deduplicated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAuditLogRequest"
+      responses:
+        "201":
+          description: Log entry created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogResponse"
+        "400":
+          description: Invalid payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/logs/batch:
+    post:
+      summary: Write multiple audit log entries
+      operationId: internalCreateAuditLogBatch
+      tags: [Internal]
+      description: |
+        Batch insert for high-throughput Kafka consumers.
+        Max 100 entries per batch.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [entries]
+              properties:
+                entries:
+                  type: array
+                  maxItems: 100
+                  items:
+                    $ref: "#/components/schemas/CreateAuditLogRequest"
+      responses:
+        "201":
+          description: Batch inserted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  inserted:
+                    type: integer
+                    example: 15
+                  duplicates_skipped:
+                    type: integer
+                    example: 0
+
+# ═══════════════════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 50
+        minimum: 1
+        maximum: 200
+
+  schemas:
+    # ── Requests ──────────────────────────────────────────────────────────────
+
+    CreateAuditLogRequest:
+      type: object
+      required: [event_id, service, actor_id, actor_type, action, resource_type, resource_id]
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          description: Unique event ID for idempotent deduplication
+          example: "evt_a1b2c3-..."
+        service:
+          type: string
+          description: Name of the source service that emitted this event
+          example: "clay-ride-order-service"
+        actor_id:
+          type: string
+          format: uuid
+          description: Who performed the action
+          example: "usr_abc123-..."
+        actor_type:
+          type: string
+          enum: [user, driver, admin, system]
+          example: admin
+        action:
+          type: string
+          description: |
+            Action identifier in `resource.verb` format. Examples:
+            `user.profile_updated`, `order.cancelled`, `payment.refunded`,
+            `merchant.menu_updated`, `admin.user_suspended`
+          example: "order.cancelled"
+        resource_type:
+          type: string
+          description: Type of resource affected
+          example: order
+        resource_id:
+          type: string
+          format: uuid
+          description: ID of the affected resource
+          example: "ord_x9y8z7-..."
+        old_value:
+          type: object
+          nullable: true
+          description: State of the resource before the action. Null for create actions.
+          example:
+            status: "in_progress"
+            cancelled_reason: null
+        new_value:
+          type: object
+          nullable: true
+          description: State of the resource after the action. Null for delete actions.
+          example:
+            status: "cancelled"
+            cancelled_reason: "driver_no_show"
+        ip_address:
+          type: string
+          nullable: true
+          example: "103.28.14.52"
+        metadata:
+          type: object
+          nullable: true
+          description: Additional context including user_agent, request_id, etc.
+          example:
+            user_agent: "Clay/2.4.1 (Android 14; SM-S918B)"
+            request_id: "req_f7e8d9c0"
+        created_at:
+          type: string
+          format: date-time
+          description: When the action occurred (from event timestamp, not insert time)
+
+    ExportRequest:
+      type: object
+      required: [from, to, format]
+      properties:
+        from:
+          type: string
+          format: date-time
+          example: "2025-04-01T00:00:00Z"
+        to:
+          type: string
+          format: date-time
+          example: "2025-04-30T23:59:59Z"
+        format:
+          type: string
+          enum: [csv, json]
+          example: csv
+        filters:
+          type: object
+          description: Optional filters (same as search params)
+          properties:
+            actor_id:
+              type: string
+              format: uuid
+            actor_type:
+              type: string
+              enum: [user, driver, admin, system]
+            action:
+              type: string
+            resource_type:
+              type: string
+
+    # ── Entities ──────────────────────────────────────────────────────────────
+
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: string
+          description: MongoDB ObjectId
+        event_id:
+          type: string
+          format: uuid
+        service:
+          type: string
+          example: "clay-ride-order-service"
+        actor_id:
+          type: string
+          format: uuid
+        actor_type:
+          type: string
+          enum: [user, driver, admin, system]
+        action:
+          type: string
+          example: "order.cancelled"
+        resource_type:
+          type: string
+          example: order
+        resource_id:
+          type: string
+          format: uuid
+        old_value:
+          type: object
+          nullable: true
+        new_value:
+          type: object
+          nullable: true
+        ip_address:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          nullable: true
+          description: Includes user_agent, request_id, and other context
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Responses ─────────────────────────────────────────────────────────────
+
+    AuditLogResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/AuditLog"
+
+    AuditLogListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditLog"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    AuditLogStatsResponse:
+      type: object
+      properties:
+        period:
+          type: object
+          properties:
+            from:
+              type: string
+              format: date
+            to:
+              type: string
+              format: date
+        total_entries:
+          type: integer
+          example: 142580
+        by_action:
+          type: array
+          description: Top actions sorted by count
+          items:
+            type: object
+            properties:
+              action:
+                type: string
+                example: "order.created"
+              count:
+                type: integer
+                example: 34521
+        by_actor_type:
+          type: object
+          properties:
+            user:
+              type: integer
+              example: 89000
+            driver:
+              type: integer
+              example: 41000
+            admin:
+              type: integer
+              example: 2580
+            system:
+              type: integer
+              example: 10000
+        by_resource_type:
+          type: array
+          description: Top resource types sorted by count
+          items:
+            type: object
+            properties:
+              resource_type:
+                type: string
+                example: order
+              count:
+                type: integer
+                example: 56000
+        top_actors:
+          type: array
+          description: Most active actors in the period
+          items:
+            type: object
+            properties:
+              actor_id:
+                type: string
+                format: uuid
+              actor_type:
+                type: string
+              action_count:
+                type: integer
+
+    ExportJobResponse:
+      type: object
+      properties:
+        export_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, processing, completed, failed]
+          example: processing
+        format:
+          type: string
+          enum: [csv, json]
+        row_count:
+          type: integer
+          nullable: true
+          description: Number of rows exported (only present when completed)
+        download_url:
+          type: string
+          nullable: true
+          description: Signed URL to download (expires in 1 hour, only when completed)
+        error_message:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: LOG_NOT_FOUND
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+        collection_count:
+          type: integer
+          description: Number of documents in audit_logs collection
+          example: 1420580
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"

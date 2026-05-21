@@ -1,0 +1,896 @@
+openapi: "3.0.3"
+info:
+  title: Clay Security Service
+  version: "1.0.0"
+  description: |
+    Fraud detection, IP blacklisting, login attempt tracking, and rate limiting
+    for the Clay platform.
+
+    ## Responsibilities
+    - Tracks and stores login attempts (success/failure) for audit & anomaly detection
+    - Manages fraud flags on user accounts (auto-flagged or manually by admin)
+    - Maintains IP blacklist for blocking malicious actors
+    - Exposes validation endpoints for API Gateway to check IP & user status pre-request
+    - Provides admin dashboard data for security operations team
+
+    ## Storage
+    - **PostgreSQL**: `login_attempts`, `fraud_flags`, `ip_blacklist`
+    - **Redis**: `security:rate:{user_id}` (sliding window counters), `security:ip_block:{ip}` (hot cache)
+
+    ## Kafka Events
+    ### Consumed
+    - `auth.login_success` → log successful attempt
+    - `auth.login_failed` → log failed attempt, check threshold for auto-flag
+    - `auth.otp_failed` → increment suspicious activity counter
+
+    ### Produced
+    - `security.user_flagged` → consumed by Auth Service (force logout), Notification Service
+    - `security.user_unflagged` → consumed by Auth Service (restore access)
+    - `security.ip_blocked` → consumed by API Gateway to update blocklist cache
+
+    ## Auto-Flag Rules
+    - 5+ failed logins in 15 min → `suspicious_login` (medium)
+    - 10+ failed OTP in 1 hour → `otp_abuse` (high)
+    - Login from 3+ countries in 24h → `impossible_travel` (high)
+    - Chargeback reported → `chargeback` (critical)
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://clay-security-service:8080
+    description: Security service (internal network)
+
+tags:
+  - name: Login Attempt
+    description: Login attempt tracking & history
+  - name: Fraud Flag
+    description: User fraud flag management
+  - name: IP Blacklist
+    description: IP blocking & allowlisting
+  - name: Validation
+    description: Pre-request validation (called by API Gateway)
+  - name: Admin
+    description: Admin-only security operations
+
+paths:
+  /health:
+    get:
+      summary: Service health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Login Attempts ────────────────────────────────────────────────────────
+
+  /login-attempts:
+    get:
+      summary: List login attempts for current user
+      operationId: listMyLoginAttempts
+      tags: [Login Attempt]
+      description: |
+        Returns the authenticated user's recent login attempts.
+        Users can review this to detect unauthorized access.
+        Shown on the "Security" page in account settings.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: success
+          in: query
+          description: Filter by attempt result
+          schema:
+            type: boolean
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Login attempt history
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginAttemptListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /admin/login-attempts:
+    get:
+      summary: Search login attempts across all users (admin)
+      operationId: adminSearchLoginAttempts
+      tags: [Admin]
+      description: |
+        Admin endpoint to search login attempts by user ID, IP address,
+        or date range. Used by security ops for investigation.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: user_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: ip_address
+          in: query
+          schema:
+            type: string
+          example: "103.28.14.52"
+        - name: success
+          in: query
+          schema:
+            type: boolean
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Login attempt results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginAttemptListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Admin role required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Fraud Flags ───────────────────────────────────────────────────────────
+
+  /admin/fraud-flags:
+    get:
+      summary: List fraud flags (admin)
+      operationId: listFraudFlags
+      tags: [Admin]
+      description: |
+        Returns fraud flags with filtering. Use `resolved=false` to see
+        active flags that need investigation.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: user_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: severity
+          in: query
+          schema:
+            type: string
+            enum: [low, medium, high, critical]
+        - name: flag_type
+          in: query
+          schema:
+            type: string
+          example: suspicious_login
+        - name: resolved
+          in: query
+          schema:
+            type: boolean
+            default: false
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Fraud flag list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FraudFlagListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Admin role required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+    post:
+      summary: Create a fraud flag manually (admin)
+      operationId: createFraudFlag
+      tags: [Admin]
+      description: |
+        Manually flag a user account. Emits `security.user_flagged` Kafka event
+        which triggers Auth Service to invalidate sessions and Notification Service
+        to alert the user.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateFraudFlagRequest"
+      responses:
+        "201":
+          description: Flag created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FraudFlagResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Admin role required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/fraud-flags/{flagId}:
+    get:
+      summary: Get fraud flag detail (admin)
+      operationId: getFraudFlag
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/FlagIdPath"
+      responses:
+        "200":
+          description: Flag detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FraudFlagResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Flag not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/fraud-flags/{flagId}/resolve:
+    post:
+      summary: Resolve a fraud flag (admin)
+      operationId: resolveFraudFlag
+      tags: [Admin]
+      description: |
+        Marks a flag as resolved with a resolution note.
+        If this was the last active flag on the user, emits `security.user_unflagged`
+        Kafka event to restore normal access.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/FlagIdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resolution_note]
+              properties:
+                resolution_note:
+                  type: string
+                  description: Why the flag was resolved
+                  example: "Verified user identity via phone call, false positive"
+      responses:
+        "200":
+          description: Flag resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FraudFlagResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Flag not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Flag already resolved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/users/{userId}/fraud-summary:
+    get:
+      summary: Get fraud summary for a user (admin)
+      operationId: getUserFraudSummary
+      tags: [Admin]
+      description: |
+        Returns a summary of all fraud flags (active and resolved),
+        recent failed login attempts, and risk score for the user.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: User fraud summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserFraudSummaryResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: Admin role required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── IP Blacklist ──────────────────────────────────────────────────────────
+
+  /admin/ip-blacklist:
+    get:
+      summary: List blocked IPs (admin)
+      operationId: listBlockedIPs
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          description: Search by IP address prefix
+          schema:
+            type: string
+        - name: active_only
+          in: query
+          description: Only show non-expired blocks
+          schema:
+            type: boolean
+            default: true
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Blocked IP list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IPBlacklistListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      summary: Block an IP address (admin)
+      operationId: blockIP
+      tags: [Admin]
+      description: |
+        Adds an IP to the blacklist. Emits `security.ip_blocked` Kafka event
+        for API Gateway to update its in-memory blocklist.
+        Set `expires_at` for temporary blocks, or omit for permanent.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BlockIPRequest"
+      responses:
+        "201":
+          description: IP blocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IPBlacklistResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: IP is already blocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/ip-blacklist/{blockId}:
+    delete:
+      summary: Unblock an IP address (admin)
+      operationId: unblockIP
+      tags: [Admin]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: blockId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: IP unblocked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: Block record not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Validation (Internal) ─────────────────────────────────────────────────
+
+  /internal/validate/ip:
+    post:
+      summary: Check if an IP is blocked
+      operationId: validateIP
+      tags: [Validation]
+      description: |
+        Called by API Gateway on every incoming request to check if the
+        client IP is blacklisted. Responds in <5ms (Redis-cached).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ip_address]
+              properties:
+                ip_address:
+                  type: string
+                  example: "103.28.14.52"
+      responses:
+        "200":
+          description: IP validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  allowed:
+                    type: boolean
+                    example: true
+                  reason:
+                    type: string
+                    nullable: true
+                    description: Reason if blocked
+                    example: null
+
+  /internal/validate/user:
+    post:
+      summary: Check if a user has active fraud flags
+      operationId: validateUser
+      tags: [Validation]
+      description: |
+        Called by Auth Service during token issuance to check if the user
+        is flagged. If `critical` severity flag exists, login is blocked.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id:
+                  type: string
+                  format: uuid
+      responses:
+        "200":
+          description: User validation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  allowed:
+                    type: boolean
+                    example: true
+                  active_flags:
+                    type: integer
+                    description: Number of unresolved fraud flags
+                    example: 0
+                  max_severity:
+                    type: string
+                    nullable: true
+                    enum: [low, medium, high, critical]
+                    description: Highest severity among active flags
+                    example: null
+
+  /internal/login-attempts:
+    post:
+      summary: Record a login attempt
+      operationId: recordLoginAttempt
+      tags: [Validation]
+      description: |
+        Called by Auth Service after every login attempt (success or failure).
+        Also called by the Kafka consumer for `auth.login_success` and `auth.login_failed`.
+        Checks auto-flag thresholds after recording.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecordLoginAttemptRequest"
+      responses:
+        "201":
+          description: Attempt recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  recorded:
+                    type: boolean
+                    example: true
+                  auto_flagged:
+                    type: boolean
+                    description: Whether an auto-flag was triggered by this attempt
+                    example: false
+
+# ═══════════════════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    FlagIdPath:
+      name: flagId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Fraud flag UUID
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 100
+
+  schemas:
+    # ── Requests ──────────────────────────────────────────────────────────────
+
+    CreateFraudFlagRequest:
+      type: object
+      required: [user_id, flag_type, severity, description]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        flag_type:
+          type: string
+          description: |
+            Flag category. Common values:
+            `suspicious_login`, `otp_abuse`, `impossible_travel`,
+            `chargeback`, `fake_account`, `abuse_report`, `manual_review`
+          example: suspicious_login
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+          example: medium
+        description:
+          type: string
+          example: "5 failed login attempts from 3 different IPs in 10 minutes"
+        source:
+          type: string
+          description: What triggered this flag
+          example: auto_rule
+
+    BlockIPRequest:
+      type: object
+      required: [ip_address, reason]
+      properties:
+        ip_address:
+          type: string
+          description: IPv4 or IPv6 address
+          example: "103.28.14.52"
+        reason:
+          type: string
+          example: "Repeated brute-force login attempts"
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the block expires. Null for permanent block.
+
+    RecordLoginAttemptRequest:
+      type: object
+      required: [user_id, ip_address, success]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        ip_address:
+          type: string
+          example: "103.28.14.52"
+        user_agent:
+          type: string
+          example: "Clay/2.4.1 (Android 14; SM-S918B)"
+        success:
+          type: boolean
+        failure_reason:
+          type: string
+          nullable: true
+          description: Only present when success=false
+          example: "invalid_password"
+
+    # ── Entities ──────────────────────────────────────────────────────────────
+
+    LoginAttempt:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        ip_address:
+          type: string
+          example: "103.28.14.52"
+        user_agent:
+          type: string
+        success:
+          type: boolean
+        failure_reason:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    FraudFlag:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        flag_type:
+          type: string
+          example: suspicious_login
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+        description:
+          type: string
+        source:
+          type: string
+          example: auto_rule
+        resolved:
+          type: boolean
+        resolved_by:
+          type: string
+          format: uuid
+          nullable: true
+        resolved_at:
+          type: string
+          format: date-time
+          nullable: true
+        resolution_note:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    IPBlacklistEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        ip_address:
+          type: string
+          example: "103.28.14.52"
+        reason:
+          type: string
+        blocked_by:
+          type: string
+          format: uuid
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        is_active:
+          type: boolean
+          description: Computed — true if expires_at is null or in the future
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Responses ─────────────────────────────────────────────────────────────
+
+    LoginAttemptListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/LoginAttempt"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    FraudFlagResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/FraudFlag"
+
+    FraudFlagListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/FraudFlag"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    IPBlacklistResponse:
+      type: object
+      properties:
+        data:
+          $ref: "#/components/schemas/IPBlacklistEntry"
+
+    IPBlacklistListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/IPBlacklistEntry"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    UserFraudSummaryResponse:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        risk_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: |
+            Computed risk score (0=safe, 100=very high risk).
+            Based on: active flag count × severity weight + recent failed logins.
+          example: 35
+        active_flags:
+          type: integer
+          example: 1
+        total_flags:
+          type: integer
+          description: All-time flag count (including resolved)
+          example: 3
+        recent_failed_logins:
+          type: integer
+          description: Failed logins in the last 24 hours
+          example: 2
+        flags:
+          type: array
+          items:
+            $ref: "#/components/schemas/FraudFlag"
+        recent_login_attempts:
+          type: array
+          description: Last 10 login attempts
+          items:
+            $ref: "#/components/schemas/LoginAttempt"
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: FLAG_NOT_FOUND
+        message:
+          type: string
+
+    ValidationErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: VALIDATION_ERROR
+        message:
+          type: string
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ValidationError:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ValidationErrorResponse"

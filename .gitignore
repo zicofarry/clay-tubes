@@ -1,0 +1,55 @@
+# ── Personal scripts ──
+/scripts/
+
+# ── Go ──
+vendor/
+*.exe
+*.test
+*.out
+*.test.exe
+
+# ── Environment ──
+.env
+.env.*
+!.env.example
+
+# ── OS ──
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ── IDE ──
+.vscode/
+.claude/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.ntifs*
+
+# ── Logs ──
+*.log
+
+# ── Temp ──
+*.tmp
+*.temp
+
+# ── Android (future) ──
+.gradle/
+build/
+local.properties
+*.apk
+*.aab
+*.keystore
+
+# ── Misc ──
+.gitattributes
+*.bak
+*.orig
+
+dummy/

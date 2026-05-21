@@ -1,0 +1,41 @@
+services:
+  mongo-audit:
+    image: mongo:7
+    container_name: clay_audit_mongo
+    environment:
+      MONGO_INITDB_DATABASE: audit_db
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongo_audit_data:/data/db
+    healthcheck:
+      test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: clay_audit_mongo_express
+    restart: always
+    ports:
+      - "8086:8081"
+    environment:
+      ME_CONFIG_MONGODB_URL: mongodb://mongo-audit:27017/
+    depends_on:
+      - mongo-audit
+
+  audit-service:
+    build: .
+    container_name: clay_audit_service
+    ports:
+      - "8007:8007"
+    environment:
+      - MONGO_URI=mongodb://mongo-audit:27017
+      - MONGO_DB_NAME=audit_db
+      - PORT=8007
+    depends_on:
+      - mongo-audit
+
+volumes:
+  mongo_audit_data:

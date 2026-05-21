@@ -1,0 +1,292 @@
+openapi: "3.0.3"
+info:
+  title: Clay Email Service
+  version: "1.0.0"
+  description: |
+    Transactional email delivery service for Clay superapp.
+
+    ## Responsibilities
+    - Sends transactional emails (OTP, receipt, account verification, password reset)
+    - Manages email templates (handlebars/gotemplate)
+    - Tracks delivery status via provider webhook
+    - Rate limits sends per recipient
+
+    ## Provider
+    - Primary: SendGrid
+    - Fallback: Mailgun
+
+    ## Storage
+    - **PostgreSQL**: `email_logs` (recipient, template, status, provider_id, sent_at)
+    - **Redis**: `email:rate:{recipient_email}` (counter, TTL 1h) — max 10 emails/hour per recipient
+
+    ## Kafka Events
+    ### Consumed
+    - `notification.email.send` → trigger email send
+
+servers:
+  - url: http://clay-email-service:8080
+    description: Email service (internal only)
+
+tags:
+  - name: Email
+    description: Email sending
+  - name: Template
+    description: Email template management
+  - name: Internal
+    description: Service-to-service send triggers
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /internal/emails/send:
+    post:
+      summary: Send a transactional email
+      operationId: sendEmail
+      tags: [Internal]
+      description: |
+        Idempotent via `Idempotency-Key` header.
+        Renders template with provided variables and sends via provider.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendEmailRequest"
+      responses:
+        "202":
+          description: Email queued for delivery
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendEmailResponse"
+        "429":
+          description: Rate limit exceeded for recipient
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/emails/{emailId}/status:
+    get:
+      summary: Get delivery status of a sent email
+      operationId: getEmailStatus
+      tags: [Internal]
+      parameters:
+        - name: emailId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Email delivery status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailStatusResponse"
+        "404":
+          description: Email log not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /webhooks/email/delivery:
+    post:
+      summary: Provider delivery status webhook
+      operationId: emailDeliveryWebhook
+      tags: [Email]
+      description: |
+        Called by SendGrid/Mailgun when email is delivered, bounced, or spam-flagged.
+        Validates provider signature and updates email_logs.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Provider-specific webhook payload
+      responses:
+        "200":
+          description: Webhook processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /templates:
+    get:
+      summary: List email templates
+      operationId: listTemplates
+      tags: [Template]
+      responses:
+        "200":
+          description: Template list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TemplateListResponse"
+    post:
+      summary: Create or update an email template
+      operationId: upsertTemplate
+      tags: [Template]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpsertTemplateRequest"
+      responses:
+        "200":
+          description: Template saved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EmailTemplate"
+
+components:
+  schemas:
+    EmailTemplateId:
+      type: string
+      enum:
+        - otp_login
+        - email_verification
+        - password_reset
+        - order_receipt
+        - ride_receipt
+        - delivery_receipt
+        - welcome
+        - driver_payout
+      description: Template identifier
+
+    SendEmailRequest:
+      type: object
+      required: [to, template_id, variables]
+      properties:
+        to:
+          type: string
+          format: email
+        to_name:
+          type: string
+          nullable: true
+        template_id:
+          $ref: "#/components/schemas/EmailTemplateId"
+        variables:
+          type: object
+          additionalProperties: true
+          description: Template variables (key-value map)
+          example:
+            otp_code: "123456"
+            user_name: "Zico"
+        reply_to:
+          type: string
+          format: email
+          nullable: true
+
+    SendEmailResponse:
+      type: object
+      properties:
+        email_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued]
+        provider:
+          type: string
+          example: sendgrid
+
+    EmailStatusResponse:
+      type: object
+      properties:
+        email_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, sent, delivered, bounced, spam, failed]
+        provider_id:
+          type: string
+          description: Provider's message ID
+        sent_at:
+          type: string
+          format: date-time
+          nullable: true
+        delivered_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    EmailTemplate:
+      type: object
+      properties:
+        template_id:
+          $ref: "#/components/schemas/EmailTemplateId"
+        subject:
+          type: string
+        body_html:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+
+    TemplateListResponse:
+      type: object
+      properties:
+        templates:
+          type: array
+          items:
+            $ref: "#/components/schemas/EmailTemplate"
+
+    UpsertTemplateRequest:
+      type: object
+      required: [template_id, subject, body_html]
+      properties:
+        template_id:
+          $ref: "#/components/schemas/EmailTemplateId"
+        subject:
+          type: string
+        body_html:
+          type: string
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string

@@ -1,0 +1,620 @@
+openapi: "3.0.3"
+info:
+  title: Clay Search Service
+  version: "1.0.0"
+  description: |
+    Full-text search service for Clay superapp, backed by Elasticsearch.
+
+    ## Responsibilities
+    - Merchant/restaurant search by name, cuisine, location
+    - Menu item search across all merchants
+    - Driver search history (recent places autocomplete)
+    - Indexes updated via Kafka events when merchants or menu items change
+
+    ## Storage
+    - **Elasticsearch**: indices `merchants`, `menu_items`
+    - **Redis**: `search:trending:{service}` (list of trending search terms, TTL 1h)
+
+    ## Kafka Events
+    ### Consumed
+    - `merchant.created` / `merchant.updated` / `merchant.deleted` → sync `merchants` index
+    - `menu_item.created` / `menu_item.updated` / `menu_item.deleted` → sync `menu_items` index
+
+servers:
+  - url: http://clay-search-service:8080
+    description: Search service
+
+tags:
+  - name: Search
+    description: Search endpoints
+  - name: Internal
+    description: Index management
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /search/merchants:
+    get:
+      summary: Search merchants/restaurants
+      operationId: searchMerchants
+      tags: [Search]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            example: "nasi goreng"
+        - name: lat
+          in: query
+          schema:
+            type: number
+            format: double
+        - name: lng
+          in: query
+          schema:
+            type: number
+            format: double
+        - name: radius_km
+          in: query
+          schema:
+            type: number
+            format: double
+            default: 10.0
+        - name: cuisine_type
+          in: query
+          schema:
+            type: string
+        - name: is_open_now
+          in: query
+          schema:
+            type: boolean
+        - name: min_rating
+          in: query
+          schema:
+            type: number
+            format: double
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+      responses:
+        "200":
+          description: Merchant search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MerchantSearchResponse"
+
+  /search/menu-items:
+    get:
+      summary: Search menu items
+      operationId: searchMenuItems
+      tags: [Search]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            example: "ayam bakar"
+        - name: lat
+          in: query
+          schema:
+            type: number
+            format: double
+        - name: lng
+          in: query
+          schema:
+            type: number
+            format: double
+        - name: radius_km
+          in: query
+          schema:
+            type: number
+            format: double
+            default: 10.0
+        - name: max_price
+          in: query
+          schema:
+            type: integer
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+      responses:
+        "200":
+          description: Menu item search results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MenuItemSearchResponse"
+
+  /search/trending:
+    get:
+      summary: Get trending search terms
+      operationId: getTrending
+      tags: [Search]
+      parameters:
+        - name: service_type
+          in: query
+          schema:
+            type: string
+            enum: [food, ride, delivery]
+            default: food
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+      responses:
+        "200":
+          description: Trending terms
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrendingResponse"
+
+  /search/suggest:
+    get:
+      summary: Autocomplete / real-time search suggestions
+      operationId: searchSuggest
+      tags: [Search]
+      description: |
+        Returns real-time autocomplete suggestions as the user types.
+        Combines merchant names, menu item names, and cuisine types.
+        Optimized for speed (prefix matching via Elasticsearch completion suggester).
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+            example: "nas"
+        - name: lat
+          in: query
+          schema:
+            type: number
+            format: double
+        - name: lng
+          in: query
+          schema:
+            type: number
+            format: double
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 8
+            maximum: 15
+      responses:
+        "200":
+          description: Autocomplete suggestions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuggestResponse"
+
+  /search/popular:
+    get:
+      summary: Get popular merchants & menu items in user's area
+      operationId: getPopular
+      tags: [Search]
+      description: |
+        Returns popular/trending merchants and menu items near the user's location.
+        Based on order volume in the last 7 days.
+        Used for the "Popular near you" section on the home screen.
+      parameters:
+        - name: lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: lng
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: radius_km
+          in: query
+          schema:
+            type: number
+            format: double
+            default: 5.0
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+            maximum: 20
+      responses:
+        "200":
+          description: Popular merchants and menu items
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PopularResponse"
+
+  /internal/index/merchants:
+    post:
+      summary: Index or update a merchant document
+      operationId: indexMerchant
+      tags: [Internal]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MerchantDocument"
+      responses:
+        "200":
+          description: Indexed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /internal/index/merchants/{merchantId}:
+    delete:
+      summary: Remove merchant from index
+      operationId: deleteMerchantIndex
+      tags: [Internal]
+      parameters:
+        - name: merchantId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Removed from index
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /internal/index/menu-items:
+    post:
+      summary: Index or update a menu item document
+      operationId: indexMenuItem
+      tags: [Internal]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MenuItemDocument"
+      responses:
+        "200":
+          description: Indexed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /internal/index/menu-items/{itemId}:
+    delete:
+      summary: Remove menu item from index
+      operationId: deleteMenuItemIndex
+      tags: [Internal]
+      parameters:
+        - name: itemId
+          in: path
+          required: true
+          schema:
+            type: string
+            description: MongoDB ObjectId
+      responses:
+        "200":
+          description: Removed from index
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  /internal/search/reindex:
+    post:
+      summary: Trigger full reindex from Merchant Catalog
+      operationId: triggerReindex
+      tags: [Internal]
+      description: |
+        Triggers a full reindex of all merchants and menu items from the Merchant Service.
+        Used for disaster recovery or when Elasticsearch index is corrupted/out of sync.
+        This is an async operation — returns immediately and processes in background.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                index:
+                  type: string
+                  enum: [merchants, menu_items, all]
+                  default: all
+                  description: Which index to reindex
+      responses:
+        "202":
+          description: Reindex job started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReindexResponse"
+
+components:
+  schemas:
+    MerchantSearchResult:
+      type: object
+      properties:
+        merchant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        cuisine_type:
+          type: string
+        address:
+          type: string
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        distance_km:
+          type: number
+          format: double
+        average_rating:
+          type: number
+          format: double
+        total_ratings:
+          type: integer
+        is_open_now:
+          type: boolean
+        logo_url:
+          type: string
+          nullable: true
+        score:
+          type: number
+          format: double
+          description: Elasticsearch relevance score
+
+    MerchantSearchResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/MerchantSearchResult"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+        took_ms:
+          type: integer
+
+    MenuItemSearchResult:
+      type: object
+      properties:
+        item_id:
+          type: string
+          description: MongoDB ObjectId
+        merchant_id:
+          type: string
+          format: uuid
+        merchant_name:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        price:
+          type: integer
+        photo_url:
+          type: string
+          nullable: true
+        is_available:
+          type: boolean
+        merchant_lat:
+          type: number
+          format: double
+        merchant_lng:
+          type: number
+          format: double
+        distance_km:
+          type: number
+          format: double
+        score:
+          type: number
+          format: double
+
+    MenuItemSearchResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/MenuItemSearchResult"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+        took_ms:
+          type: integer
+
+    TrendingResponse:
+      type: object
+      properties:
+        terms:
+          type: array
+          items:
+            type: string
+
+    SuggestResponse:
+      type: object
+      properties:
+        suggestions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Suggestion"
+
+    Suggestion:
+      type: object
+      properties:
+        text:
+          type: string
+          description: Suggested text
+          example: "Nasi Goreng Kambing"
+        type:
+          type: string
+          enum: [merchant, menu_item, cuisine]
+          description: Type of the suggestion
+        id:
+          type: string
+          description: ID of the matched entity (merchant_id or item_id)
+        merchant_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Present when type is menu_item
+
+    PopularResponse:
+      type: object
+      properties:
+        merchants:
+          type: array
+          items:
+            $ref: "#/components/schemas/MerchantSearchResult"
+        menu_items:
+          type: array
+          items:
+            $ref: "#/components/schemas/MenuItemSearchResult"
+
+    ReindexResponse:
+      type: object
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        index:
+          type: string
+        status:
+          type: string
+          enum: [started]
+        message:
+          type: string
+          example: "Reindex job started in background"
+
+    MerchantDocument:
+      type: object
+      required: [merchant_id, name]
+      properties:
+        merchant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        cuisine_type:
+          type: string
+        address:
+          type: string
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        is_active:
+          type: boolean
+        is_open_now:
+          type: boolean
+        average_rating:
+          type: number
+          format: double
+        logo_url:
+          type: string
+          nullable: true
+
+    MenuItemDocument:
+      type: object
+      required: [item_id, merchant_id, name]
+      properties:
+        item_id:
+          type: string
+          description: MongoDB ObjectId
+        merchant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        price:
+          type: integer
+        is_available:
+          type: boolean
+        photo_url:
+          type: string
+          nullable: true
+        merchant_lat:
+          type: number
+          format: double
+        merchant_lng:
+          type: number
+          format: double
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string

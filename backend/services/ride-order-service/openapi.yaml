@@ -1,0 +1,1371 @@
+openapi: 3.0.3
+info:
+  title: Clay Ride Order Service API
+  description: |
+    Manages the full lifecycle of ride orders (GoRide & GoCar) on the Clay platform.
+
+    **Database:**
+    - PostgreSQL — ride_orders, order_state_logs, trip_details, order_fare_breakdown
+    - Redis — hot order state cache (TTL 2h), anti-double-booking lock
+
+    **State Machine:**
+    ```
+    pending → finding_driver → assigned → on_pickup → on_trip → completed
+                                       ↘           ↘         ↘
+                                        cancelled   cancelled  cancelled
+    ```
+
+    **Kafka Events Produced:**
+    - `Order_Created`   — consumed by Matching, Chat, Notification
+    - `Order_Cancelled` — consumed by Payment, Matching, Notification
+    - `Trip_Completed`  — consumed by Payment, Rating, Chat, Notification
+
+    **Kafka Events Consumed:**
+    - `Driver_Found` (from Matching Service) — updates order to `assigned`
+  version: 1.0.0
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://localhost:3003/api/v1
+    description: Local development
+  - url: https://api.clay.id/ride/v1
+    description: Production (via API Gateway)
+
+tags:
+  - name: Order
+    description: User-facing order management
+  - name: Driver
+    description: Driver-facing order actions
+  - name: Fare
+    description: Fare estimation & breakdown
+  - name: Internal
+    description: Internal service-to-service endpoints (not exposed via API Gateway)
+
+paths:
+  # ─────────────────────────── Fare ───────────────────────────
+  /orders/estimate:
+    post:
+      operationId: estimateFare
+      tags: [Fare]
+      summary: Estimate fare before creating an order
+      description: |
+        Calls Pricing Service and Geo Service to compute fare estimate
+        based on origin, destination, vehicle type, and active surge zones.
+        Does not create an order. Used by user app on the booking screen.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FareEstimateRequest'
+      responses:
+        '200':
+          description: Fare estimate calculated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FareEstimateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─────────────────────────── Order ───────────────────────────
+  /orders:
+    post:
+      operationId: createRideOrder
+      tags: [Order]
+      summary: Create a new ride order (GoRide / GoCar)
+      description: |
+        Creates a ride order and publishes `Order_Created` to Kafka.
+        Matching Service consumes this event and begins looking for a driver.
+
+        **Pre-conditions:**
+        - User must not have an active order (`user:active_order:{user_id}` Redis key must be empty)
+        - Fare estimate is fetched from Pricing Service server-side
+        - GoPay payment: hold is initiated via Payment Service before Kafka publish
+        - Cash payment: no hold, fare collected at end of trip
+
+        **Anti-double-booking:** Sets `user:active_order:{user_id}` in Redis (TTL 2h).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRideOrderRequest'
+      responses:
+        '201':
+          description: Order created — driver search initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RideOrderResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: User already has an active order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: ACTIVE_ORDER_EXISTS
+                  message: You already have an active ride order
+        '422':
+          description: Promo code invalid or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Upstream service unavailable (Pricing / Payment)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /orders/active:
+    get:
+      operationId: getActiveOrder
+      tags: [Order]
+      summary: Get current user's active order
+      description: |
+        Returns the user's currently active ride order if any.
+        Served from Redis cache (`order:{order_id}`) when available.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Active order found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RideOrderResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: No active order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: NO_ACTIVE_ORDER
+                  message: No active order found for this user
+
+  /orders/history:
+    get:
+      operationId: getRideOrderHistory
+      tags: [Order]
+      summary: Get user's ride order history (paginated)
+      description: |
+        Returns paginated list of the authenticated user's past ride orders.
+        Supports filtering by status, service type, and date range.
+        Results sorted by `created_at DESC`.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          description: Page number
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+          description: Items per page
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [completed, cancelled]
+          description: Filter by final status
+        - name: service_type
+          in: query
+          schema:
+            type: string
+            enum: [goride, gocar]
+          description: Filter by service type
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date
+          description: Start date filter (inclusive), e.g. 2025-01-01
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date
+          description: End date filter (inclusive), e.g. 2025-12-31
+      responses:
+        '200':
+          description: Paginated list of past orders
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RideOrderHistoryResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /orders/{orderId}:
+    get:
+      operationId: getRideOrder
+      tags: [Order]
+      summary: Get ride order detail by ID
+      description: |
+        Returns full order detail including state logs and trip details.
+        User can only access their own orders.
+        Driver can access orders assigned to them.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Order detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RideOrderDetailResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — order does not belong to this user/driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /orders/{orderId}/cancel:
+    post:
+      operationId: cancelRideOrder
+      tags: [Order]
+      summary: Cancel a ride order
+      description: |
+        Cancels the order if it is in a cancellable state.
+
+        **Cancellable states:** `pending`, `finding_driver`, `assigned`, `on_pickup`
+        **Non-cancellable states:** `on_trip`, `completed`, `cancelled`
+
+        Cancellation after driver is `assigned` or `on_pickup` may incur a
+        cancellation fee (determined by Pricing Service rules).
+
+        Publishes `Order_Cancelled` Kafka event on success.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 255
+                  example: "Salah pilih tujuan"
+      responses:
+        '200':
+          description: Order cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RideOrderResponse'
+        '400':
+          description: Order is in a non-cancellable state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: CANNOT_CANCEL_ON_TRIP
+                  message: Cannot cancel an order that is already on trip
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the order owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /orders/{orderId}/rate:
+    post:
+      operationId: submitRating
+      tags: [Order]
+      summary: Submit rating after order is completed
+      description: |
+        Submits a rating for the completed order. This endpoint is a thin
+        proxy — it validates that the order belongs to the authenticated user
+        and is in `completed` state, then forwards the rating to Rating Service.
+
+        **Can only be called once per order per user.**
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitRatingRequest'
+      responses:
+        '201':
+          description: Rating submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the order owner
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Rating already submitted for this order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: RATING_ALREADY_SUBMITTED
+                  message: You have already rated this order
+        '422':
+          description: Order is not in completed state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: ORDER_NOT_COMPLETED
+                  message: Can only rate a completed order
+
+  /orders/{orderId}/fare-breakdown:
+    get:
+      operationId: getFareBreakdown
+      tags: [Fare]
+      summary: Get fare breakdown for a completed order
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Fare breakdown
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FareBreakdownResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the order owner or assigned driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found or fare not yet finalized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Driver ───────────────────────────
+  /driver/orders/{orderId}/accept:
+    post:
+      operationId: driverAcceptOrder
+      tags: [Driver]
+      summary: Driver accepts a broadcast order
+      description: |
+        Called by driver app when driver taps "Accept" on a broadcasted order.
+        Transitions order from `finding_driver` → `assigned`.
+        Generates a 6-digit OTP for pickup verification.
+
+        If another driver already accepted this order (race condition),
+        returns `409 ALREADY_TAKEN`.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Order accepted — OTP generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DriverAcceptResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — caller is not a driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Order already taken by another driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: error
+                error:
+                  code: ORDER_ALREADY_TAKEN
+                  message: This order has already been accepted by another driver
+
+  /driver/orders/{orderId}/reject:
+    post:
+      operationId: driverRejectOrder
+      tags: [Driver]
+      summary: Driver rejects a broadcast order
+      description: |
+        Called by driver app when driver taps "Reject" on a broadcasted order.
+        Notifies Matching Service to remove this driver from the broadcast list
+        and try the next candidate.
+
+        Driver rejection is recorded to prevent re-broadcasting same order
+        to the same driver within the broadcast window.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  enum: [too_far, wrong_direction, personal_reason, other]
+                  example: too_far
+      responses:
+        '200':
+          description: Order rejected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — caller is not a driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /driver/orders/{orderId}/status:
+    put:
+      operationId: driverUpdateOrderStatus
+      tags: [Driver]
+      summary: Driver updates order status
+      description: |
+        Unified endpoint for driver to progress the order through its lifecycle.
+
+        **Allowed transitions per `action`:**
+
+        | action | from_state | to_state | extra required |
+        |--------|-----------|----------|----------------|
+        | `arrived_at_pickup` | `assigned` | `on_pickup` | — |
+        | `start_trip` | `on_pickup` | `on_trip` | `otp_code` (6 digits) |
+        | `complete_trip` | `on_trip` | `completed` | `actual_distance_km`, `actual_duration_min` |
+
+        On `complete_trip`: calculates `fare_final`, publishes `Trip_Completed`.
+        On `start_trip`: verifies OTP before transitioning.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DriverUpdateStatusRequest'
+      responses:
+        '200':
+          description: Status updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RideOrderResponse'
+        '400':
+          description: Invalid action, wrong state, or missing required fields
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_otp:
+                  summary: OTP incorrect
+                  value:
+                    status: error
+                    error:
+                      code: INVALID_OTP
+                      message: OTP code is incorrect
+                wrong_state:
+                  summary: Order not in expected state
+                  value:
+                    status: error
+                    error:
+                      code: INVALID_STATE_TRANSITION
+                      message: Cannot perform start_trip on order in assigned state
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not the assigned driver
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Internal ───────────────────────────
+  /internal/orders:
+    post:
+      operationId: internalCreateOrder
+      tags: [Internal]
+      summary: Create order from internal orchestrator
+      description: |
+        Allows an internal orchestrator service to create a ride order
+        on behalf of a user. Skips payment hold initiation — assumes the
+        caller has already handled it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalCreateOrderRequest'
+      responses:
+        '201':
+          description: Order created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RideOrderResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          description: User already has an active order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/orders/{orderId}:
+    get:
+      operationId: internalGetOrder
+      tags: [Internal]
+      summary: Get order data for internal service calls
+      description: |
+        Called by Chat, Tracking, and Notification services to get
+        order context. Not exposed via API Gateway.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      responses:
+        '200':
+          description: Order internal data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RideOrderInternalResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/orders/{orderId}/status:
+    put:
+      operationId: internalUpdateOrderStatus
+      tags: [Internal]
+      summary: Update order status from another service
+      description: |
+        General-purpose status update called by internal services.
+        Used by Matching Service to transition `finding_driver → assigned`
+        or `finding_driver → cancelled` (no driver found).
+
+        All state transitions are recorded in `order_state_logs`.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalUpdateStatusRequest'
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RideOrderInternalResponse'
+        '400':
+          description: Invalid state transition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Order is already in a terminal state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/orders/{orderId}/assign-driver:
+    put:
+      operationId: internalAssignDriver
+      tags: [Internal]
+      summary: Assign driver to order (called by Matching Service)
+      description: |
+        Atomically assigns a driver and transitions `finding_driver → assigned`.
+        Generates a 6-digit OTP stored in both PostgreSQL and Redis.
+        Returns the OTP so Matching Service can forward it via Notification Service.
+      parameters:
+        - $ref: '#/components/parameters/OrderId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [driver_id, eta_seconds]
+              properties:
+                driver_id:
+                  type: string
+                  format: uuid
+                eta_seconds:
+                  type: integer
+                  example: 180
+      responses:
+        '200':
+          description: Driver assigned — OTP generated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    properties:
+                      order_id:
+                        type: string
+                        format: uuid
+                      driver_id:
+                        type: string
+                        format: uuid
+                      otp_code:
+                        type: string
+                        example: "847291"
+                      status:
+                        type: string
+                        example: assigned
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Order is no longer in finding_driver state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Health ───────────────────────────
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: clay-ride-order-service
+                  timestamp:
+                    type: string
+                    format: date-time
+
+# ═══════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Ride order UUID
+
+  schemas:
+    # ── Request Schemas ───────────────────────────────────────────
+    CreateRideOrderRequest:
+      type: object
+      required: [service_type, vehicle_type, origin_lat, origin_lng, dest_lat, dest_lng, payment_method]
+      properties:
+        service_type:
+          type: string
+          enum: [goride, gocar]
+          example: goride
+        vehicle_type:
+          type: string
+          enum: [motor, car]
+          example: motor
+        origin_lat:
+          type: number
+          format: double
+          example: -6.914744
+        origin_lng:
+          type: number
+          format: double
+          example: 107.609810
+        origin_address:
+          type: string
+          example: "Jl. Braga No.1, Bandung"
+        dest_lat:
+          type: number
+          format: double
+          example: -6.921000
+        dest_lng:
+          type: number
+          format: double
+          example: 107.607000
+        dest_address:
+          type: string
+          example: "Jl. Dago No.5, Bandung"
+        payment_method:
+          type: string
+          enum: [gopay, cash]
+          example: gopay
+        promo_id:
+          type: string
+          format: uuid
+          nullable: true
+        fare_estimate:
+          type: number
+          format: double
+          description: Client-side estimate for display only — server recalculates
+          example: 18000
+
+    FareEstimateRequest:
+      type: object
+      required: [origin_lat, origin_lng, dest_lat, dest_lng, vehicle_type]
+      properties:
+        origin_lat:
+          type: number
+          format: double
+          example: -6.914744
+        origin_lng:
+          type: number
+          format: double
+          example: 107.609810
+        dest_lat:
+          type: number
+          format: double
+          example: -6.921000
+        dest_lng:
+          type: number
+          format: double
+          example: 107.607000
+        vehicle_type:
+          type: string
+          enum: [motor, car]
+          example: motor
+        promo_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    DriverUpdateStatusRequest:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [arrived_at_pickup, start_trip, complete_trip]
+          example: start_trip
+        otp_code:
+          type: string
+          pattern: '^\d{6}$'
+          description: Required when action = start_trip
+          example: "847291"
+        actual_distance_km:
+          type: number
+          format: double
+          description: Required when action = complete_trip
+          example: 3.2
+        actual_duration_min:
+          type: integer
+          description: Required when action = complete_trip
+          example: 18
+        dropoff_lat:
+          type: number
+          format: double
+          description: Optional — actual dropoff coordinates
+          example: -6.921000
+        dropoff_lng:
+          type: number
+          format: double
+          example: 107.607000
+
+    SubmitRatingRequest:
+      type: object
+      required: [score]
+      properties:
+        score:
+          type: integer
+          minimum: 1
+          maximum: 5
+          example: 5
+        comment:
+          type: string
+          maxLength: 500
+          example: "Driver ramah dan tepat waktu"
+        tags:
+          type: array
+          items:
+            type: string
+          example: ["on_time", "friendly", "safe_driving"]
+
+    InternalCreateOrderRequest:
+      type: object
+      required: [user_id, service_type, vehicle_type, origin_lat, origin_lng, dest_lat, dest_lng, payment_method]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        service_type:
+          type: string
+          enum: [goride, gocar]
+        vehicle_type:
+          type: string
+          enum: [motor, car]
+        origin_lat:
+          type: number
+          format: double
+        origin_lng:
+          type: number
+          format: double
+        origin_address:
+          type: string
+        dest_lat:
+          type: number
+          format: double
+        dest_lng:
+          type: number
+          format: double
+        dest_address:
+          type: string
+        payment_method:
+          type: string
+          enum: [gopay, cash]
+        promo_id:
+          type: string
+          format: uuid
+          nullable: true
+        fare_estimate:
+          type: number
+          format: double
+
+    InternalUpdateStatusRequest:
+      type: object
+      required: [status, actor_type]
+      properties:
+        status:
+          type: string
+          enum: [finding_driver, assigned, on_pickup, on_trip, completed, cancelled]
+        actor_type:
+          type: string
+          enum: [user, driver, system]
+          example: system
+        actor_id:
+          type: string
+          format: uuid
+          nullable: true
+        reason:
+          type: string
+          example: no_driver_found
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Extra context stored in order_state_logs.metadata (JSONB)
+
+    # ── Response Schemas ──────────────────────────────────────────
+    RideOrder:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        driver_id:
+          type: string
+          format: uuid
+          nullable: true
+        service_type:
+          type: string
+          enum: [goride, gocar]
+        vehicle_type:
+          type: string
+          enum: [motor, car]
+        status:
+          type: string
+          enum: [pending, finding_driver, assigned, on_pickup, on_trip, completed, cancelled]
+        origin_lat:
+          type: number
+          format: double
+        origin_lng:
+          type: number
+          format: double
+        origin_address:
+          type: string
+        dest_lat:
+          type: number
+          format: double
+        dest_lng:
+          type: number
+          format: double
+        dest_address:
+          type: string
+        fare_estimate:
+          type: number
+          format: double
+        fare_final:
+          type: number
+          format: double
+          nullable: true
+        payment_method:
+          type: string
+          enum: [gopay, cash]
+        otp_code:
+          type: string
+          nullable: true
+          description: Only included in responses to the assigned driver
+        cancel_reason:
+          type: string
+          nullable: true
+        cancelled_by:
+          type: string
+          enum: [user, driver, system]
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    TripDetails:
+      type: object
+      properties:
+        polyline:
+          type: string
+          nullable: true
+        est_distance_km:
+          type: number
+          format: double
+        est_duration_min:
+          type: integer
+        actual_distance_km:
+          type: number
+          format: double
+          nullable: true
+        actual_duration_min:
+          type: integer
+          nullable: true
+        route_deviation_km:
+          type: number
+          format: double
+          nullable: true
+        pickup_time:
+          type: string
+          format: date-time
+          nullable: true
+        dropoff_time:
+          type: string
+          format: date-time
+          nullable: true
+
+    OrderStateLog:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        from_state:
+          type: string
+          nullable: true
+        to_state:
+          type: string
+        actor_type:
+          type: string
+          enum: [user, driver, system]
+        reason:
+          type: string
+          nullable: true
+        changed_at:
+          type: string
+          format: date-time
+
+    FareBreakdown:
+      type: object
+      properties:
+        base_fare:
+          type: number
+          format: double
+        distance_fare:
+          type: number
+          format: double
+        time_fare:
+          type: number
+          format: double
+        surge_multiplier:
+          type: number
+          format: double
+          example: 1.5
+          description: 1.0 means no surge
+        promo_discount:
+          type: number
+          format: double
+        platform_fee:
+          type: number
+          format: double
+        total:
+          type: number
+          format: double
+
+    RideOrderResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/RideOrder'
+
+    RideOrderDetailResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          allOf:
+            - $ref: '#/components/schemas/RideOrder'
+            - type: object
+              properties:
+                trip_details:
+                  $ref: '#/components/schemas/TripDetails'
+                state_logs:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/OrderStateLog'
+
+    RideOrderHistoryResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/RideOrder'
+        meta:
+          type: object
+          properties:
+            page:
+              type: integer
+              example: 1
+            limit:
+              type: integer
+              example: 10
+            total:
+              type: integer
+              example: 42
+            total_pages:
+              type: integer
+              example: 5
+
+    DriverAcceptResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            order_id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+            otp_code:
+              type: string
+              example: "847291"
+            origin_lat:
+              type: number
+              format: double
+            origin_lng:
+              type: number
+              format: double
+            origin_address:
+              type: string
+            dest_address:
+              type: string
+            fare_estimate:
+              type: number
+              format: double
+            payment_method:
+              type: string
+            status:
+              type: string
+              example: assigned
+
+    FareEstimateResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            vehicle_type:
+              type: string
+              enum: [motor, car]
+            distance_km:
+              type: number
+              format: double
+              example: 3.2
+            duration_min:
+              type: integer
+              example: 18
+            fare_estimate:
+              type: number
+              format: double
+              example: 18000
+            surge_multiplier:
+              type: number
+              format: double
+              example: 1.0
+            promo_discount:
+              type: number
+              format: double
+              example: 2000
+            fare_after_promo:
+              type: number
+              format: double
+              example: 16000
+            breakdown:
+              $ref: '#/components/schemas/FareBreakdown'
+
+    FareBreakdownResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/FareBreakdown'
+
+    RideOrderInternalResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            user_id:
+              type: string
+              format: uuid
+            driver_id:
+              type: string
+              format: uuid
+              nullable: true
+            service_type:
+              type: string
+            status:
+              type: string
+            payment_method:
+              type: string
+            fare_final:
+              type: number
+              nullable: true
+            created_at:
+              type: string
+              format: date-time
+
+    # ── Common ────────────────────────────────────────────────────
+    MessageResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: ORDER_NOT_FOUND
+            message:
+              type: string
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'

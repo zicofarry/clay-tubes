@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  postgres-wallet:
+    image: postgres:15-alpine
+    container_name: clay_wallet_postgres
+    environment:
+      POSTGRES_USER: clay_user
+      POSTGRES_PASSWORD: clay_password
+      POSTGRES_DB: wallet_db
+    ports:
+      - "5452:5432"
+    volumes:
+      - postgres_wallet_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U clay_user -d wallet_db" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-wallet:
+    image: redis:7-alpine
+    container_name: clay_wallet_redis
+    ports:
+      - "6392:6379"
+
+  adminer:
+    image: adminer
+    container_name: clay_wallet_adminer
+    restart: always
+    ports:
+      - "9022:8080"
+
+volumes:
+  postgres_wallet_data:

@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  postgres-geo:
+    image: postgres:15-alpine
+    container_name: clay_geo_postgres
+    environment:
+      POSTGRES_USER: clay_user
+      POSTGRES_PASSWORD: clay_password
+      POSTGRES_DB: geo_db
+    ports:
+      - "5439:5432"
+    volumes:
+      - postgres_geo_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U clay_user -d geo_db" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-geo:
+    image: redis:7-alpine
+    container_name: clay_geo_redis
+    ports:
+      - "6379:6379"
+
+  adminer:
+    image: adminer
+    container_name: clay_geo_adminer
+    restart: always
+    ports:
+      - "9009:8080"
+
+volumes:
+  postgres_geo_data:

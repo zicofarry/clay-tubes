@@ -1,0 +1,48 @@
+services:
+  postgres-promotion:
+    image: postgres:15-alpine
+    container_name: clay_promotion_postgres
+    environment:
+      POSTGRES_USER: clay_user
+      POSTGRES_PASSWORD: clay_password
+      POSTGRES_DB: promotion_db
+    ports:
+      - "5443:5432" 
+    volumes:
+      - postgres_promotion_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clay_user -d promotion_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-promotion:
+    image: redis:7-alpine
+    container_name: clay_promotion_redis
+    ports:
+      - "6383:6379" 
+
+  adminer-promotion:
+    image: adminer
+    container_name: clay_promotion_adminer
+    restart: always
+    ports:
+      - "9013:8080" 
+    depends_on:
+      - postgres-promotion
+
+  promotion-service:
+    build: .
+    container_name: clay_promotion_service
+    ports:
+      - "8013:8013" 
+    environment:
+      - POSTGRES_DSN=host=postgres-promotion user=clay_user password=clay_password dbname=promotion_db port=5432 sslmode=disable TimeZone=UTC
+      - REDIS_ADDR=redis-promotion:6379
+      - PORT=8013
+    depends_on:
+      - postgres-promotion
+      - redis-promotion
+
+volumes:
+  postgres_promotion_data:

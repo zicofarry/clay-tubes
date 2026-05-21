@@ -1,0 +1,48 @@
+services:
+  postgres-history:
+    image: postgres:15-alpine
+    container_name: clay_history_postgres
+    environment:
+      POSTGRES_USER: clay_user
+      POSTGRES_PASSWORD: clay_password
+      POSTGRES_DB: history_db
+    ports:
+      - "5453:5432" 
+    volumes:
+      - postgres_history_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clay_user -d history_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-history:
+    image: redis:7-alpine
+    container_name: clay_history_redis
+    ports:
+      - "6393:6379" 
+
+  adminer-history:
+    image: adminer
+    container_name: clay_history_adminer
+    restart: always
+    ports:
+      - "9023:8080" 
+    depends_on:
+      - postgres-history
+
+  history-service:
+    build: .
+    container_name: clay_history_service
+    ports:
+      - "8023:8023" 
+    environment:
+      - POSTGRES_DSN=host=postgres-history user=clay_user password=clay_password dbname=history_db port=5432 sslmode=disable TimeZone=UTC
+      - REDIS_ADDR=redis-history:6379
+      - PORT=8023
+    depends_on:
+      - postgres-history
+      - redis-history
+
+volumes:
+  postgres_history_data:

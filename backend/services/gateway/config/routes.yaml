@@ -1,0 +1,1437 @@
+# Clay API Gateway — Route Table
+# ─────────────────────────────────────────────────────────────────────────────
+# Format per route:
+#   path:         URL path (supports {param} wildcards)
+#   methods:      allowed HTTP methods
+#   upstream:     target service host:port
+#   auth:         none | required | "required_roles:[role1,role2]"
+#   rate_limit:   requests per minute (0 = unlimited)
+#   strip_prefix: prefix to strip before forwarding (optional)
+#
+# Auth behaviour:
+#   none           → no JWT required (public endpoint)
+#   required       → valid JWT required, any role
+#   required_roles → valid JWT required, must match one of listed roles
+#
+# After JWT validation, gateway injects:
+#   X-User-ID    → user_id from JWT claims
+#   X-User-Role  → role from JWT claims
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AUTH SERVICE
+# Upstream: clay-auth-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /auth/register
+  methods: [POST]
+  upstream: clay-auth-service:8080
+  auth: none
+  rate_limit: 10
+
+- path: /auth/request-otp
+  methods: [POST]
+  upstream: clay-auth-service:8080
+  auth: none
+  rate_limit: 10
+
+- path: /auth/verify-otp
+  methods: [POST]
+  upstream: clay-auth-service:8080
+  auth: none
+  rate_limit: 20
+
+- path: /auth/login
+  methods: [POST]
+  upstream: clay-auth-service:8080
+  auth: none
+  rate_limit: 20
+
+- path: /auth/login/otp
+  methods: [POST]
+  upstream: clay-auth-service:8080
+  auth: none
+  rate_limit: 20
+
+- path: /auth/refresh-token
+  methods: [POST]
+  upstream: clay-auth-service:8080
+  auth: none
+  rate_limit: 60
+
+- path: /auth/logout
+  methods: [POST]
+  upstream: clay-auth-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /auth/logout-all
+  methods: [POST]
+  upstream: clay-auth-service:8080
+  auth: required
+  rate_limit: 10
+
+- path: /auth/sessions
+  methods: [GET]
+  upstream: clay-auth-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /auth/sessions/revoke-all
+  methods: [POST]
+  upstream: clay-auth-service:8080
+  auth: required
+  rate_limit: 10
+
+- path: /auth/sessions/{sessionId}
+  methods: [DELETE]
+  upstream: clay-auth-service:8080
+  auth: required
+  rate_limit: 30
+
+- path: /auth/password/forgot
+  methods: [POST]
+  upstream: clay-auth-service:8080
+  auth: none
+  rate_limit: 5
+
+- path: /auth/password/reset
+  methods: [POST]
+  upstream: clay-auth-service:8080
+  auth: none
+  rate_limit: 10
+
+- path: /auth/password/change
+  methods: [PUT]
+  upstream: clay-auth-service:8080
+  auth: required
+  rate_limit: 10
+
+# ══════════════════════════════════════════════════════════════════════════════
+# USER SERVICE
+# Upstream: clay-user-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /users/me
+  methods: [GET, POST, PUT]
+  upstream: clay-user-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /users/me/avatar
+  methods: [PUT]
+  upstream: clay-user-service:8080
+  auth: required
+  rate_limit: 20
+
+- path: /users/me/referral/apply
+  methods: [POST]
+  upstream: clay-user-service:8080
+  auth: required
+  rate_limit: 5
+
+- path: /users/{userId}
+  methods: [GET]
+  upstream: clay-user-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /addresses
+  methods: [GET, POST]
+  upstream: clay-user-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /addresses/{addressId}
+  methods: [PUT, DELETE]
+  upstream: clay-user-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /addresses/{addressId}/default
+  methods: [PUT]
+  upstream: clay-user-service:8080
+  auth: required
+  rate_limit: 30
+
+- path: /settings
+  methods: [GET, PUT]
+  upstream: clay-user-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /drivers/register
+  methods: [POST]
+  upstream: clay-user-service:8080
+  auth: required
+  rate_limit: 5
+
+- path: /drivers/me
+  methods: [GET, PUT]
+  upstream: clay-user-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /drivers/me/documents
+  methods: [GET, POST]
+  upstream: clay-user-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 30
+
+- path: /drivers/me/documents/{documentId}
+  methods: [GET, DELETE]
+  upstream: clay-user-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 30
+
+- path: /drivers/{driverId}
+  methods: [GET]
+  upstream: clay-user-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /drivers/{driverId}/status
+  methods: [PUT]
+  upstream: clay-user-service:8080
+  auth: "required_roles:[driver,admin]"
+  rate_limit: 30
+
+- path: /drivers/{driverId}/verification
+  methods: [GET]
+  upstream: clay-user-service:8080
+  auth: "required_roles:[driver,admin]"
+  rate_limit: 30
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RIDE ORDER SERVICE
+# Upstream: clay-ride-order-service:8080
+# strip_prefix /ride → upstream sees /orders/..., /driver/...
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /ride/orders/estimate
+  methods: [POST]
+  upstream: clay-ride-order-service:8080
+  strip_prefix: /ride
+  auth: "required_roles:[user]"
+  rate_limit: 60
+
+- path: /ride/orders
+  methods: [POST]
+  upstream: clay-ride-order-service:8080
+  strip_prefix: /ride
+  auth: "required_roles:[user]"
+  rate_limit: 30
+
+- path: /ride/orders/active
+  methods: [GET]
+  upstream: clay-ride-order-service:8080
+  strip_prefix: /ride
+  auth: "required_roles:[user]"
+  rate_limit: 120
+
+- path: /ride/orders/history
+  methods: [GET]
+  upstream: clay-ride-order-service:8080
+  strip_prefix: /ride
+  auth: "required_roles:[user]"
+  rate_limit: 60
+
+- path: /ride/orders/{orderId}
+  methods: [GET]
+  upstream: clay-ride-order-service:8080
+  strip_prefix: /ride
+  auth: required
+  rate_limit: 120
+
+- path: /ride/orders/{orderId}/cancel
+  methods: [POST]
+  upstream: clay-ride-order-service:8080
+  strip_prefix: /ride
+  auth: "required_roles:[user]"
+  rate_limit: 30
+
+- path: /ride/orders/{orderId}/fare-breakdown
+  methods: [GET]
+  upstream: clay-ride-order-service:8080
+  strip_prefix: /ride
+  auth: required
+  rate_limit: 60
+
+- path: /ride/orders/{orderId}/rate
+  methods: [POST]
+  upstream: clay-ride-order-service:8080
+  strip_prefix: /ride
+  auth: "required_roles:[user]"
+  rate_limit: 30
+
+- path: /ride/driver/orders/{orderId}/accept
+  methods: [POST]
+  upstream: clay-ride-order-service:8080
+  strip_prefix: /ride
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /ride/driver/orders/{orderId}/reject
+  methods: [POST]
+  upstream: clay-ride-order-service:8080
+  strip_prefix: /ride
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /ride/driver/orders/{orderId}/status
+  methods: [PUT]
+  upstream: clay-ride-order-service:8080
+  strip_prefix: /ride
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FOOD ORDER SERVICE
+# Upstream: clay-food-order-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /food/orders/estimate
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[user]"
+  rate_limit: 60
+
+- path: /food/orders
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[user]"
+  rate_limit: 30
+
+- path: /food/orders/active
+  methods: [GET]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[user]"
+  rate_limit: 120
+
+- path: /food/orders/history
+  methods: [GET]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[user]"
+  rate_limit: 60
+
+- path: /food/orders/{orderId}
+  methods: [GET]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: required
+  rate_limit: 120
+
+- path: /food/orders/{orderId}/cancel
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[user]"
+  rate_limit: 30
+
+- path: /food/orders/{orderId}/fare-breakdown
+  methods: [GET]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: required
+  rate_limit: 60
+
+- path: /food/orders/{orderId}/rate
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[user]"
+  rate_limit: 30
+
+- path: /food/merchant/orders
+  methods: [GET]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[merchant]"
+  rate_limit: 120
+
+- path: /food/merchant/orders/{orderId}
+  methods: [GET]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[merchant]"
+  rate_limit: 120
+
+- path: /food/merchant/orders/{orderId}/confirm
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[merchant]"
+  rate_limit: 60
+
+- path: /food/merchant/orders/{orderId}/reject
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[merchant]"
+  rate_limit: 60
+
+- path: /food/merchant/orders/{orderId}/status
+  methods: [PUT]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[merchant]"
+  rate_limit: 60
+
+- path: /food/driver/orders/{orderId}/pickup
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /food/driver/orders/{orderId}/deliver
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DELIVERY ORDER SERVICE
+# Upstream: clay-delivery-order-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /delivery/orders/estimate
+  methods: [POST]
+  upstream: clay-delivery-order-service:8080
+  strip_prefix: /delivery
+  auth: "required_roles:[user]"
+  rate_limit: 60
+
+- path: /delivery/orders
+  methods: [POST]
+  upstream: clay-delivery-order-service:8080
+  strip_prefix: /delivery
+  auth: "required_roles:[user]"
+  rate_limit: 30
+
+- path: /delivery/orders/active
+  methods: [GET]
+  upstream: clay-delivery-order-service:8080
+  strip_prefix: /delivery
+  auth: "required_roles:[user]"
+  rate_limit: 120
+
+- path: /delivery/orders/history
+  methods: [GET]
+  upstream: clay-delivery-order-service:8080
+  strip_prefix: /delivery
+  auth: "required_roles:[user]"
+  rate_limit: 60
+
+- path: /delivery/orders/{orderId}
+  methods: [GET]
+  upstream: clay-delivery-order-service:8080
+  strip_prefix: /delivery
+  auth: required
+  rate_limit: 120
+
+- path: /delivery/orders/{orderId}/cancel
+  methods: [POST]
+  upstream: clay-delivery-order-service:8080
+  strip_prefix: /delivery
+  auth: "required_roles:[user]"
+  rate_limit: 30
+
+- path: /delivery/orders/{orderId}/fare-breakdown
+  methods: [GET]
+  upstream: clay-delivery-order-service:8080
+  strip_prefix: /delivery
+  auth: required
+  rate_limit: 60
+
+- path: /delivery/orders/{orderId}/rate
+  methods: [POST]
+  upstream: clay-delivery-order-service:8080
+  strip_prefix: /delivery
+  auth: "required_roles:[user]"
+  rate_limit: 30
+
+- path: /delivery/driver/orders/{orderId}/accept
+  methods: [POST]
+  upstream: clay-delivery-order-service:8080
+  strip_prefix: /delivery
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /delivery/driver/orders/{orderId}/reject
+  methods: [POST]
+  upstream: clay-delivery-order-service:8080
+  strip_prefix: /delivery
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /delivery/driver/orders/{orderId}/status
+  methods: [PUT]
+  upstream: clay-delivery-order-service:8080
+  strip_prefix: /delivery
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MERCHANT SERVICE
+# Upstream: clay-merchant-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /merchants
+  methods: [POST]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 5
+
+- path: /merchants/me
+  methods: [GET, PUT]
+  upstream: clay-merchant-service:8080
+  auth: "required_roles:[merchant]"
+  rate_limit: 60
+
+- path: /merchants/{merchantId}
+  methods: [GET]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /merchants/{merchantId}/status
+  methods: [PATCH]
+  upstream: clay-merchant-service:8080
+  auth: "required_roles:[merchant]"
+  rate_limit: 30
+
+- path: /merchants/{merchantId}/operating-hours
+  methods: [GET, PUT]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /merchants/{merchantId}/bank-accounts
+  methods: [GET, POST]
+  upstream: clay-merchant-service:8080
+  auth: "required_roles:[merchant]"
+  rate_limit: 30
+
+- path: /merchants/{merchantId}/bank-accounts/{accountId}
+  methods: [DELETE]
+  upstream: clay-merchant-service:8080
+  auth: "required_roles:[merchant]"
+  rate_limit: 30
+
+- path: /merchants/{merchantId}/bank-accounts/{accountId}/set-primary
+  methods: [PATCH]
+  upstream: clay-merchant-service:8080
+  auth: "required_roles:[merchant]"
+  rate_limit: 30
+
+- path: /merchants/{merchantId}/menu/categories
+  methods: [GET, POST]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /merchants/{merchantId}/menu/categories/reorder
+  methods: [PATCH]
+  upstream: clay-merchant-service:8080
+  auth: "required_roles:[merchant]"
+  rate_limit: 30
+
+- path: /merchants/{merchantId}/menu/categories/{categoryId}
+  methods: [PUT, DELETE]
+  upstream: clay-merchant-service:8080
+  auth: "required_roles:[merchant]"
+  rate_limit: 60
+
+- path: /merchants/{merchantId}/menu/items
+  methods: [GET, POST]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /merchants/{merchantId}/menu/items/{itemId}
+  methods: [GET, PUT, DELETE]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /merchants/{merchantId}/menu/items/{itemId}/availability
+  methods: [PATCH]
+  upstream: clay-merchant-service:8080
+  auth: "required_roles:[merchant]"
+  rate_limit: 60
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAYMENT SERVICE
+# Upstream: clay-payment-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /payment-methods
+  methods: [GET, POST]
+  upstream: clay-payment-service:8080
+  auth: required
+  rate_limit: 30
+
+- path: /payment-methods/{methodId}
+  methods: [DELETE]
+  upstream: clay-payment-service:8080
+  auth: required
+  rate_limit: 30
+
+- path: /payment-methods/{methodId}/set-default
+  methods: [POST]
+  upstream: clay-payment-service:8080
+  auth: required
+  rate_limit: 30
+
+- path: /transactions
+  methods: [GET]
+  upstream: clay-payment-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /transactions/{transactionId}
+  methods: [GET]
+  upstream: clay-payment-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /cod/verify/initiate
+  methods: [POST]
+  upstream: clay-payment-service:8080
+  auth: "required_roles:[user]"
+  rate_limit: 10
+
+- path: /cod/verify/{verificationId}/status
+  methods: [GET]
+  upstream: clay-payment-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /cod/verify/{verificationId}/otp
+  methods: [POST]
+  upstream: clay-payment-service:8080
+  auth: required
+  rate_limit: 20
+
+- path: /cod/verify/{verificationId}/respond
+  methods: [POST]
+  upstream: clay-payment-service:8080
+  auth: required
+  rate_limit: 20
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WALLET SERVICE
+# Upstream: clay-wallet-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /wallet
+  methods: [GET]
+  upstream: clay-wallet-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /wallet/topup
+  methods: [POST]
+  upstream: clay-wallet-service:8080
+  auth: required
+  rate_limit: 10
+
+- path: /wallet/topup/callback
+  methods: [POST]
+  upstream: clay-wallet-service:8080
+  auth: none
+  rate_limit: 0
+
+- path: /wallet/transfer
+  methods: [POST]
+  upstream: clay-wallet-service:8080
+  auth: required
+  rate_limit: 10
+
+- path: /wallet/transactions
+  methods: [GET]
+  upstream: clay-wallet-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /wallet/transactions/{txId}
+  methods: [GET]
+  upstream: clay-wallet-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /driver/wallet/balance
+  methods: [GET]
+  upstream: clay-wallet-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /driver/wallet/transactions
+  methods: [GET]
+  upstream: clay-wallet-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /driver/settlements
+  methods: [GET]
+  upstream: clay-wallet-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /driver/settlements/{orderId}
+  methods: [GET]
+  upstream: clay-wallet-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROMOTION SERVICE
+# Upstream: clay-promotion-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /promos/validate
+  methods: [POST]
+  upstream: clay-promotion-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /vouchers
+  methods: [GET]
+  upstream: clay-promotion-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /vouchers/claim
+  methods: [POST]
+  upstream: clay-promotion-service:8080
+  auth: required
+  rate_limit: 20
+
+# ══════════════════════════════════════════════════════════════════════════════
+# RATING SERVICE
+# Upstream: clay-rating-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /ratings
+  methods: [POST]
+  upstream: clay-rating-service:8080
+  auth: required
+  rate_limit: 30
+
+- path: /ratings/me/given
+  methods: [GET]
+  upstream: clay-rating-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /ratings/me/received
+  methods: [GET]
+  upstream: clay-rating-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /ratings/orders/{orderId}
+  methods: [GET]
+  upstream: clay-rating-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /ratings/{subjectType}/{subjectId}
+  methods: [GET]
+  upstream: clay-rating-service:8080
+  auth: required
+  rate_limit: 120
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CHAT SERVICE
+# Upstream: clay-chat-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /rooms
+  methods: [GET]
+  upstream: clay-chat-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /rooms/by-order/{orderId}
+  methods: [GET]
+  upstream: clay-chat-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /rooms/{roomId}
+  methods: [GET]
+  upstream: clay-chat-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /rooms/{roomId}/messages
+  methods: [GET, POST]
+  upstream: clay-chat-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /rooms/{roomId}/messages/upload
+  methods: [POST]
+  upstream: clay-chat-service:8080
+  auth: required
+  rate_limit: 20
+
+- path: /rooms/{roomId}/read
+  methods: [POST]
+  upstream: clay-chat-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /rooms/{roomId}/unread-count
+  methods: [GET]
+  upstream: clay-chat-service:8080
+  auth: required
+  rate_limit: 120
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SEARCH SERVICE
+# Upstream: clay-search-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /search/merchants
+  methods: [GET]
+  upstream: clay-search-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /search/menu-items
+  methods: [GET]
+  upstream: clay-search-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /search/suggest
+  methods: [GET]
+  upstream: clay-search-service:8080
+  auth: required
+  rate_limit: 300
+
+- path: /search/trending
+  methods: [GET]
+  upstream: clay-search-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /search/popular
+  methods: [GET]
+  upstream: clay-search-service:8080
+  auth: required
+  rate_limit: 120
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GEO SERVICE
+# Upstream: clay-geo-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /maps/estimate
+  methods: [POST]
+  upstream: clay-geo-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /maps/polyline
+  methods: [GET]
+  upstream: clay-geo-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /maps/routing
+  methods: [GET]
+  upstream: clay-geo-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /maps/snapping
+  methods: [POST]
+  upstream: clay-geo-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /maps/traffic
+  methods: [GET]
+  upstream: clay-geo-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /maps/places/autocomplete
+  methods: [GET]
+  upstream: clay-geo-service:8080
+  auth: required
+  rate_limit: 300
+
+- path: /maps/places/details
+  methods: [GET]
+  upstream: clay-geo-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /maps/geocode
+  methods: [POST]
+  upstream: clay-geo-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /maps/reverse-geocode
+  methods: [POST]
+  upstream: clay-geo-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /distance
+  methods: [GET]
+  upstream: clay-geo-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /geofence/check
+  methods: [POST]
+  upstream: clay-geo-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /drivers/{driverId}/location
+  methods: [GET, PUT]
+  upstream: clay-geo-service:8080
+  auth: "required_roles:[driver,user]"
+  rate_limit: 600
+
+- path: /drivers/nearby
+  methods: [GET]
+  upstream: clay-geo-service:8080
+  auth: required
+  rate_limit: 60
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PRICING SERVICE
+# Upstream: clay-pricing-service:8080
+# strip_prefix /pricing → upstream sees /estimate/..., /surge
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /pricing/estimate/ride
+  methods: [POST]
+  upstream: clay-pricing-service:8080
+  strip_prefix: /pricing
+  auth: required
+  rate_limit: 60
+
+- path: /pricing/estimate/food
+  methods: [POST]
+  upstream: clay-pricing-service:8080
+  strip_prefix: /pricing
+  auth: required
+  rate_limit: 60
+
+- path: /pricing/estimate/delivery
+  methods: [POST]
+  upstream: clay-pricing-service:8080
+  strip_prefix: /pricing
+  auth: required
+  rate_limit: 60
+
+- path: /pricing/surge
+  methods: [GET]
+  upstream: clay-pricing-service:8080
+  strip_prefix: /pricing
+  auth: required
+  rate_limit: 120
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TRACKING SERVICE
+# Upstream: clay-tracking-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /tracking/orders/{orderId}/position
+  methods: [GET]
+  upstream: clay-tracking-service:8080
+  auth: required
+  rate_limit: 300
+
+- path: /tracking/orders/{orderId}/eta
+  methods: [GET]
+  upstream: clay-tracking-service:8080
+  auth: required
+  rate_limit: 120
+
+- path: /tracking/orders/{orderId}/route
+  methods: [GET]
+  upstream: clay-tracking-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /routes/{orderId}
+  methods: [GET]
+  upstream: clay-tracking-service:8080
+  auth: required
+  rate_limit: 60
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NOTIFICATION SERVICE
+# Upstream: clay-notification-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /notifications
+  methods: [GET]
+  upstream: clay-notification-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /notifications/{notificationId}
+  methods: [GET]
+  upstream: clay-notification-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /device-tokens
+  methods: [GET, POST]
+  upstream: clay-notification-service:8080
+  auth: required
+  rate_limit: 30
+
+- path: /device-tokens/{tokenId}
+  methods: [DELETE]
+  upstream: clay-notification-service:8080
+  auth: required
+  rate_limit: 30
+
+- path: /preferences
+  methods: [GET, PUT]
+  upstream: clay-notification-service:8080
+  auth: required
+  rate_limit: 30
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HISTORY SERVICE
+# Upstream: clay-history-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /history/orders
+  methods: [GET]
+  upstream: clay-history-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /history/orders/stats
+  methods: [GET]
+  upstream: clay-history-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /history/orders/{orderId}
+  methods: [GET]
+  upstream: clay-history-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /history/transactions
+  methods: [GET]
+  upstream: clay-history-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /history/transactions/{transactionId}
+  methods: [GET]
+  upstream: clay-history-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /feed
+  methods: [GET]
+  upstream: clay-history-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /feed/{feedId}
+  methods: [GET]
+  upstream: clay-history-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /driver/history/orders
+  methods: [GET]
+  upstream: clay-history-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /driver/history/earnings
+  methods: [GET]
+  upstream: clay-history-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECURITY SERVICE  (admin only)
+# Upstream: clay-security-service:8080
+# strip_prefix /security → upstream sees /login-attempts, /admin/...
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /security/login-attempts
+  methods: [GET]
+  upstream: clay-security-service:8080
+  strip_prefix: /security
+  auth: required
+  rate_limit: 60
+
+- path: /security/admin/login-attempts
+  methods: [GET]
+  upstream: clay-security-service:8080
+  strip_prefix: /security
+  auth: "required_roles:[admin]"
+  rate_limit: 60
+
+- path: /security/admin/fraud-flags
+  methods: [GET, POST]
+  upstream: clay-security-service:8080
+  strip_prefix: /security
+  auth: "required_roles:[admin]"
+  rate_limit: 30
+
+- path: /security/admin/fraud-flags/{flagId}
+  methods: [GET]
+  upstream: clay-security-service:8080
+  strip_prefix: /security
+  auth: "required_roles:[admin]"
+  rate_limit: 60
+
+- path: /security/admin/fraud-flags/{flagId}/resolve
+  methods: [POST]
+  upstream: clay-security-service:8080
+  strip_prefix: /security
+  auth: "required_roles:[admin]"
+  rate_limit: 30
+
+- path: /security/admin/ip-blacklist
+  methods: [GET, POST]
+  upstream: clay-security-service:8080
+  strip_prefix: /security
+  auth: "required_roles:[admin]"
+  rate_limit: 30
+
+- path: /security/admin/ip-blacklist/{blockId}
+  methods: [DELETE]
+  upstream: clay-security-service:8080
+  strip_prefix: /security
+  auth: "required_roles:[admin]"
+  rate_limit: 30
+
+- path: /security/admin/users/{userId}/fraud-summary
+  methods: [GET]
+  upstream: clay-security-service:8080
+  strip_prefix: /security
+  auth: "required_roles:[admin]"
+  rate_limit: 60
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AUDIT LOG SERVICE  (admin only)
+# Upstream: clay-audit-log-service:8080
+# strip_prefix /audit → upstream sees /admin/logs/...
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /audit/admin/logs
+  methods: [GET]
+  upstream: clay-audit-log-service:8080
+  strip_prefix: /audit
+  auth: "required_roles:[admin]"
+  rate_limit: 30
+
+- path: /audit/admin/logs/stats
+  methods: [GET]
+  upstream: clay-audit-log-service:8080
+  strip_prefix: /audit
+  auth: "required_roles:[admin]"
+  rate_limit: 30
+
+- path: /audit/admin/logs/export
+  methods: [POST]
+  upstream: clay-audit-log-service:8080
+  strip_prefix: /audit
+  auth: "required_roles:[admin]"
+  rate_limit: 5
+
+- path: /audit/admin/logs/export/{exportId}
+  methods: [GET]
+  upstream: clay-audit-log-service:8080
+  strip_prefix: /audit
+  auth: "required_roles:[admin]"
+  rate_limit: 30
+
+- path: /audit/admin/logs/by-actor/{actorId}
+  methods: [GET]
+  upstream: clay-audit-log-service:8080
+  strip_prefix: /audit
+  auth: "required_roles:[admin]"
+  rate_limit: 60
+
+- path: /audit/admin/logs/by-resource/{resourceType}/{resourceId}
+  methods: [GET]
+  upstream: clay-audit-log-service:8080
+  strip_prefix: /audit
+  auth: "required_roles:[admin]"
+  rate_limit: 60
+
+- path: /audit/admin/logs/{logId}
+  methods: [GET]
+  upstream: clay-audit-log-service:8080
+  strip_prefix: /audit
+  auth: "required_roles:[admin]"
+  rate_limit: 60
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WEBHOOK PASSTHROUGH
+# No JWT auth — each service validates provider signature internally
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /webhooks/email/delivery
+  methods: [POST]
+  upstream: clay-email-service:8080
+  auth: none
+  rate_limit: 0
+
+- path: /webhooks/sms/delivery
+  methods: [POST]
+  upstream: clay-sms-service:8080
+  auth: none
+  rate_limit: 0
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MATCHING SERVICE  (driver dispatcher)
+# Upstream: clay-matching-service:8080
+# strip_prefix /dispatcher → upstream sees /dispatcher/go-online etc.
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /dispatcher/go-online
+  methods: [POST]
+  upstream: clay-matching-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /dispatcher/go-offline
+  methods: [POST]
+  upstream: clay-matching-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /dispatcher/location
+  methods: [PUT]
+  upstream: clay-matching-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 120
+
+- path: /dispatcher/heartbeat
+  methods: [POST]
+  upstream: clay-matching-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 120
+
+- path: /dispatcher/respond
+  methods: [POST]
+  upstream: clay-matching-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /dispatcher/mode
+  methods: [PUT]
+  upstream: clay-matching-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 30
+
+- path: /dispatcher/status
+  methods: [GET]
+  upstream: clay-matching-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+- path: /dispatcher/earnings/today
+  methods: [GET]
+  upstream: clay-matching-service:8080
+  auth: "required_roles:[driver]"
+  rate_limit: 60
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FOOD ORDER SERVICE  (GoFood)
+# Upstream: clay-food-order-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /food/orders/estimate
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: required
+  rate_limit: 60
+
+- path: /food/orders/active
+  methods: [GET]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: required
+  rate_limit: 60
+
+- path: /food/orders/history
+  methods: [GET]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: required
+  rate_limit: 60
+
+- path: /food/orders
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: required
+  rate_limit: 10
+
+- path: /food/orders/{orderId}
+  methods: [GET]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: required
+  rate_limit: 60
+
+- path: /food/orders/{orderId}/cancel
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: required
+  rate_limit: 10
+
+- path: /food/orders/{orderId}/rate
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: required
+  rate_limit: 10
+
+- path: /food/orders/{orderId}/fare-breakdown
+  methods: [GET]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: required
+  rate_limit: 60
+
+# Merchant-facing food order actions
+- path: /food/merchant/orders
+  methods: [GET]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[merchant]"
+  rate_limit: 60
+
+- path: /food/merchant/orders/{orderId}
+  methods: [GET]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[merchant]"
+  rate_limit: 60
+
+- path: /food/merchant/orders/{orderId}/confirm
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[merchant]"
+  rate_limit: 30
+
+- path: /food/merchant/orders/{orderId}/reject
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[merchant]"
+  rate_limit: 30
+
+- path: /food/merchant/orders/{orderId}/status
+  methods: [PUT]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[merchant]"
+  rate_limit: 30
+
+# Driver-facing food order actions
+- path: /food/driver/orders/{orderId}/pickup
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[driver]"
+  rate_limit: 30
+
+- path: /food/driver/orders/{orderId}/deliver
+  methods: [POST]
+  upstream: clay-food-order-service:8080
+  strip_prefix: /food
+  auth: "required_roles:[driver]"
+  rate_limit: 30
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MERCHANT SERVICE  (merchant profile & catalog)
+# Upstream: clay-merchant-service:8080
+# ══════════════════════════════════════════════════════════════════════════════
+- path: /merchants
+  methods: [POST]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 5
+
+- path: /merchants/me
+  methods: [GET, PUT]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /merchants/{merchantId}
+  methods: [GET]
+  upstream: clay-merchant-service:8080
+  auth: none
+  rate_limit: 120
+
+- path: /merchants/{merchantId}/status
+  methods: [PATCH]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 30
+
+- path: /merchants/{merchantId}/operating-hours
+  methods: [GET, PUT]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /merchants/{merchantId}/bank-accounts
+  methods: [GET, POST]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 30
+
+- path: /merchants/{merchantId}/bank-accounts/{accountId}
+  methods: [DELETE]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 10
+
+- path: /merchants/{merchantId}/bank-accounts/{accountId}/set-primary
+  methods: [PATCH]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 10
+
+- path: /merchants/{merchantId}/menu/categories
+  methods: [GET, POST]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /merchants/{merchantId}/menu/categories/reorder
+  methods: [PATCH]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 30
+
+- path: /merchants/{merchantId}/menu/categories/{categoryId}
+  methods: [PUT, DELETE]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 30
+
+- path: /merchants/{merchantId}/menu/items
+  methods: [GET, POST]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /merchants/{merchantId}/menu/items/{itemId}
+  methods: [GET, PUT, DELETE]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 60
+
+- path: /merchants/{merchantId}/menu/items/{itemId}/availability
+  methods: [PATCH]
+  upstream: clay-merchant-service:8080
+  auth: required
+  rate_limit: 30

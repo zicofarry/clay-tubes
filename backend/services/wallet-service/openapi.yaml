@@ -1,0 +1,727 @@
+openapi: "3.0.3"
+info:
+  title: Clay Wallet Service
+  version: "1.0.0"
+  description: |
+    In-app wallet (Clay Wallet) management for Clay superapp.
+
+    ## Responsibilities
+    - Maintains wallet balance per user
+    - Processes top-ups via payment gateway (Midtrans/Xendit)
+    - Handles wallet deductions for order payments (called by Payment Service)
+    - Handles wallet credits for refunds and cashback
+    - Provides transaction history (wallet-specific ledger)
+
+    ## Concurrency Safety
+    - Balance updates use PostgreSQL row-level locking (`SELECT ... FOR UPDATE`)
+    - Redis `wallet:balance:{user_id}` caches current balance (invalidated on write)
+    - Idempotency keys prevent double-crediting refunds
+
+    ## Storage
+    - **PostgreSQL**: `wallets` (balance, user_id), `wallet_transactions` (ledger)
+    - **Redis**: `wallet:balance:{user_id}` (cache, TTL 5 min)
+
+    ## Kafka Events
+    ### Consumed
+    - `payment.refunded` → credit refund back to wallet
+    - `settlement.created` → credit driver wallet from settlement
+    ### Produced
+    - `wallet.topped_up` → for notification service
+    - `wallet.transferred` → for notification service
+
+servers:
+  - url: http://clay-wallet-service:8080
+    description: Wallet service
+
+tags:
+  - name: Wallet
+    description: Wallet balance and top-up
+  - name: Transaction
+    description: Wallet transaction ledger
+  - name: Driver
+    description: Driver wallet and settlement endpoints
+  - name: Internal
+    description: Service-to-service debit/credit operations
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Wallet ────────────────────────────────────────────────────────────────
+
+  /wallet:
+    get:
+      summary: Get wallet balance and info
+      operationId: getWallet
+      tags: [Wallet]
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: Wallet info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletResponse"
+
+  /wallet/topup:
+    post:
+      summary: Initiate a wallet top-up
+      operationId: topUpWallet
+      tags: [Wallet]
+      description: |
+        Creates a pending top-up transaction and returns a payment gateway redirect URL.
+        Top-up is credited after gateway confirms payment via webhook.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TopUpRequest"
+      responses:
+        "201":
+          description: Top-up initiated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TopUpResponse"
+        "422":
+          description: Invalid amount
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /wallet/topup/callback:
+    post:
+      summary: Payment gateway webhook for top-up confirmation
+      operationId: topUpCallback
+      tags: [Wallet]
+      description: |
+        Called by payment gateway (Midtrans/Xendit) when top-up payment is confirmed.
+        Validates signature, credits wallet balance, emits `wallet.topped_up` Kafka event.
+        This endpoint is NOT authenticated with user JWT — uses gateway webhook signature.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TopUpCallbackRequest"
+      responses:
+        "200":
+          description: Callback processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "400":
+          description: Invalid signature or duplicate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Transactions ──────────────────────────────────────────────────────────
+
+  /wallet/transactions:
+    get:
+      summary: Get wallet transaction history
+      operationId: getWalletTransactions
+      tags: [Transaction]
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+        - name: type
+          in: query
+          schema:
+            $ref: "#/components/schemas/WalletTxType"
+      responses:
+        "200":
+          description: Wallet transaction list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletTransactionListResponse"
+
+  /wallet/transactions/{txId}:
+    get:
+      summary: Get transaction detail
+      operationId: getWalletTransactionDetail
+      tags: [Transaction]
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: txId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Transaction detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletTransaction"
+        "404":
+          description: Transaction not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /wallet/transfer:
+    post:
+      summary: Transfer saldo ke user lain
+      operationId: transferBalance
+      tags: [Wallet]
+      description: |
+        Transfer saldo Clay Wallet ke user lain berdasarkan nomor HP.
+        Minimum transfer Rp 1.000. Sender dan receiver harus punya wallet aktif.
+        Publishes `wallet.transferred` Kafka event.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransferRequest"
+      responses:
+        "200":
+          description: Transfer berhasil
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransferResponse"
+        "402":
+          description: Insufficient balance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Recipient not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Driver Wallet ─────────────────────────────────────────────────────────
+
+  /driver/wallet/balance:
+    get:
+      summary: Get driver wallet balance
+      operationId: getDriverWalletBalance
+      tags: [Driver]
+      description: |
+        Returns the active wallet balance for the authenticated driver.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "200":
+          description: Driver wallet balance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletResponse"
+
+  /driver/wallet/transactions:
+    get:
+      summary: Get driver wallet transaction history
+      operationId: getDriverWalletTransactions
+      tags: [Driver]
+      description: |
+        Returns the transaction ledger for the driver's wallet.
+        Includes settlements, tips, deductions, and withdrawals.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+        - name: type
+          in: query
+          schema:
+            $ref: "#/components/schemas/WalletTxType"
+      responses:
+        "200":
+          description: Driver transaction list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletTransactionListResponse"
+
+  /driver/settlements:
+    get:
+      summary: Get driver settlement history
+      operationId: getDriverSettlements
+      tags: [Driver]
+      description: |
+        Returns the list of settlement payouts for the driver.
+        Each settlement corresponds to a completed order.
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+      responses:
+        "200":
+          description: Settlement list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SettlementListResponse"
+
+  /driver/settlements/{orderId}:
+    get:
+      summary: Get settlement detail for a specific order
+      operationId: getDriverSettlementDetail
+      tags: [Driver]
+      parameters:
+        - $ref: "#/components/parameters/UserId"
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Settlement detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settlement"
+        "404":
+          description: Settlement not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Internal ──────────────────────────────────────────────────────────────
+
+  /internal/wallet/debit:
+    post:
+      summary: Debit wallet for an order payment
+      operationId: debitWallet
+      tags: [Internal]
+      description: |
+        Called by Payment Service to deduct balance for Clay Wallet payments.
+        Idempotent via `Idempotency-Key` header.
+        Returns 402 if balance insufficient.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WalletDebitRequest"
+      responses:
+        "200":
+          description: Debit successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletOperationResponse"
+        "402":
+          description: Insufficient balance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /internal/wallet/credit:
+    post:
+      summary: Credit wallet (refund or cashback)
+      operationId: creditWallet
+      tags: [Internal]
+      description: |
+        Called by Payment Service for refunds, or by Promo Service for cashback.
+        Idempotent via `Idempotency-Key` header.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WalletCreditRequest"
+      responses:
+        "200":
+          description: Credit successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletOperationResponse"
+
+  /internal/wallet/{userId}/balance:
+    get:
+      summary: Get wallet balance for a user (service-to-service)
+      operationId: getWalletBalance
+      tags: [Internal]
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Balance info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BalanceResponse"
+        "404":
+          description: Wallet not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  parameters:
+    UserId:
+      name: X-User-ID
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Authenticated user ID (set by API Gateway from JWT)
+
+  schemas:
+    # ── Enums ────────────────────────────────────────────────────────────────
+
+    WalletTxType:
+      type: string
+      enum: [top_up, debit, credit, refund, cashback, transfer_in, transfer_out, settlement]
+
+    TopUpChannel:
+      type: string
+      enum: [bank_transfer, credit_card, gopay, ovo, dana]
+
+    # ── Wallet ────────────────────────────────────────────────────────────────
+
+    WalletResponse:
+      type: object
+      properties:
+        wallet_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        balance:
+          type: integer
+          description: Balance in IDR
+        is_active:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    TopUpRequest:
+      type: object
+      required: [amount, channel]
+      properties:
+        amount:
+          type: integer
+          description: IDR amount to top up
+          minimum: 10000
+          maximum: 10000000
+        channel:
+          $ref: "#/components/schemas/TopUpChannel"
+
+    TopUpResponse:
+      type: object
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+        channel:
+          $ref: "#/components/schemas/TopUpChannel"
+        redirect_url:
+          type: string
+          description: Payment gateway URL to complete the top-up
+        expires_at:
+          type: string
+          format: date-time
+
+    TopUpCallbackRequest:
+      type: object
+      required: [transaction_id, status, signature]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [success, failure]
+        amount:
+          type: integer
+        signature:
+          type: string
+          description: HMAC-SHA256 signature from gateway for verification
+        gateway_reference:
+          type: string
+
+    BalanceResponse:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        balance:
+          type: integer
+          description: Balance in IDR
+
+    # ── Transactions ──────────────────────────────────────────────────────────
+
+    WalletTransaction:
+      type: object
+      properties:
+        tx_id:
+          type: string
+          format: uuid
+        type:
+          $ref: "#/components/schemas/WalletTxType"
+        amount:
+          type: integer
+          description: IDR (positive = credit, negative = debit)
+        balance_after:
+          type: integer
+          description: Balance snapshot after this transaction
+        reference_id:
+          type: string
+          format: uuid
+          description: order_id or top_up transaction_id
+        description:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    WalletTransactionListResponse:
+      type: object
+      properties:
+        transactions:
+          type: array
+          items:
+            $ref: "#/components/schemas/WalletTransaction"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    # ── Internal Operations ───────────────────────────────────────────────────
+
+    WalletDebitRequest:
+      type: object
+      required: [user_id, amount, reference_id, description]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          description: IDR amount to deduct (positive)
+        reference_id:
+          type: string
+          format: uuid
+          description: order_id
+        description:
+          type: string
+          example: "Payment for ClayFood order"
+
+    WalletCreditRequest:
+      type: object
+      required: [user_id, amount, reference_id, description, type]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          description: IDR amount to add (positive)
+        reference_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [refund, cashback]
+        description:
+          type: string
+          example: "Refund for cancelled ClayRide order"
+
+    WalletOperationResponse:
+      type: object
+      properties:
+        tx_id:
+          type: string
+          format: uuid
+        balance_before:
+          type: integer
+        balance_after:
+          type: integer
+        amount:
+          type: integer
+
+    # ── Transfer ───────────────────────────────────────────────────────────────
+
+    TransferRequest:
+      type: object
+      required: [recipient_phone, amount]
+      properties:
+        recipient_phone:
+          type: string
+          pattern: "^\\+62[0-9]{9,12}$"
+          example: "+6281234567890"
+        amount:
+          type: integer
+          minimum: 1000
+          description: IDR amount to transfer
+        notes:
+          type: string
+          maxLength: 100
+          nullable: true
+
+    TransferResponse:
+      type: object
+      properties:
+        tx_id:
+          type: string
+          format: uuid
+        sender_balance_after:
+          type: integer
+        recipient_phone:
+          type: string
+        amount:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Settlement ─────────────────────────────────────────────────────────────
+
+    Settlement:
+      type: object
+      properties:
+        settlement_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        service_type:
+          type: string
+          enum: [ride, food, delivery]
+        gross_fare:
+          type: integer
+          description: Total fare paid by user
+        platform_fee:
+          type: integer
+          description: Platform commission deducted
+        driver_payout:
+          type: integer
+          description: Amount credited to driver wallet
+        status:
+          type: string
+          enum: [settled, pending]
+        settled_at:
+          type: string
+          format: date-time
+
+    SettlementListResponse:
+      type: object
+      properties:
+        settlements:
+          type: array
+          items:
+            $ref: "#/components/schemas/Settlement"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    # ── Common ────────────────────────────────────────────────────────────────
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: INSUFFICIENT_BALANCE
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string

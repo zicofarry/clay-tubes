@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  postgres-merchant:
+    image: postgres:15-alpine
+    container_name: clay_merchant_postgres
+    environment:
+      POSTGRES_USER: clay_user
+      POSTGRES_PASSWORD: clay_password
+      POSTGRES_DB: clay_merchant
+    ports:
+      - "5441:5432"
+    volumes:
+      - postgres_merchant_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clay_user -d clay_merchant"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mongodb-merchant:
+    image: mongo:6-jammy
+    container_name: clay_merchant_mongo
+    environment:
+      MONGO_INITDB_DATABASE: clay_merchant
+    ports:
+      - "27020:27017"
+    volumes:
+      - mongo_merchant_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  adminer:
+    image: adminer
+    container_name: clay_merchant_adminer
+    restart: always
+    ports:
+      - "9011:8080"
+
+  mongo-express:  # tes ui mongodb
+    image: mongo-express
+    container_name: clay_merchant_mongo_express
+    restart: always
+    ports:
+      - "9012:8081"
+    environment:
+      ME_CONFIG_MONGODB_SERVER: mongodb-merchant
+      ME_CONFIG_MONGODB_PORT: 27017
+      ME_CONFIG_BASICAUTH_USERNAME: admin
+      ME_CONFIG_BASICAUTH_PASSWORD: admin123
+    depends_on:
+      - mongodb-merchant
+
+volumes:
+  postgres_merchant_data:
+  mongo_merchant_data:

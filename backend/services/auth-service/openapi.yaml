@@ -1,0 +1,829 @@
+openapi: "3.0.3"
+info:
+  title: Clay Auth Service
+  version: "1.0.0"
+  description: |
+    Authentication & authorization service for the Clay platform.
+
+    ## Responsibilities
+    - User/driver/merchant registration with phone verification
+    - Login via email/phone + password, or passwordless OTP
+    - JWT access token (15 min) + refresh token (30 days) issuance
+    - Session management across multiple devices
+    - Password reset flow via OTP
+    - Rate limiting on sensitive endpoints
+
+    ## Auth Flow (OTP Login)
+    1. Client calls `POST /auth/request-otp` with phone number
+    2. OTP sent via SMS Service → user receives 6-digit code
+    3. Client calls `POST /auth/login` with phone + OTP code
+    4. Server validates OTP → issues access_token + refresh_token
+    5. Client stores tokens → uses access_token in Authorization header
+
+    ## Token Lifecycle
+    - **Access Token**: JWT, 15 min TTL, contains user_id, role, scope
+    - **Refresh Token**: opaque, 30 day TTL, stored in Redis
+    - **Rotation**: every refresh issues a new pair, old refresh is revoked
+    - **Blacklist**: revoked JTIs stored in Redis for remaining TTL
+
+    ## Storage
+    - **PostgreSQL**: `credentials`, `otp_logs`, `sessions` tables
+    - **Redis**:
+      - `session:{user_id}:{session_id}` (TTL 30d) — active sessions
+      - `otp:{phone}` (TTL 5min) — hashed OTP codes
+      - `blacklist:jti:{jti}` (TTL = remaining access token life) — revoked tokens
+      - `rate:login:{identifier}` (TTL 15min) — login attempt counter
+
+    ## Kafka Events Produced
+    - `auth.login_success` → consumed by Security Service (audit)
+    - `auth.login_failed` → consumed by Security Service (fraud detection)
+    - `auth.otp_requested` → consumed by Notification Service (send OTP)
+    - `auth.user_registered` → consumed by User Service (create profile)
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://clay-auth-service:8080
+    description: Auth service
+
+tags:
+  - name: Registration
+    description: User, driver & merchant registration
+  - name: OTP
+    description: OTP request & verification
+  - name: Login
+    description: Login and logout flows
+  - name: Token
+    description: JWT access/refresh token management
+  - name: Session
+    description: Active session management
+  - name: Password
+    description: Password reset flow
+
+paths:
+  # ─────────────────────────── Registration ───────────────────────────
+  /auth/register:
+    post:
+      operationId: registerUser
+      tags: [Registration]
+      summary: Register a new user account
+      description: |
+        Creates a new credential record. Sends OTP to the provided phone
+        number for verification. Returns a pending user object.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: Account created – OTP sent to phone
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegisterResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '409':
+          description: Email or phone already registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  # ─────────────────────────── Login ───────────────────────────
+  /auth/login:
+    post:
+      operationId: loginUser
+      tags: [Login]
+      summary: Login with email/phone + password
+      description: |
+        Authenticates user credentials. On success returns JWT access token
+        and refresh token. Records session in Redis with device metadata.
+        Rate-limited to 5 attempts per 15-minute window per identifier.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokenResponse'
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Account suspended or not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /auth/login/otp:
+    post:
+      operationId: loginWithOtp
+      tags: [Login, OTP]
+      summary: Login via phone OTP (passwordless)
+      description: |
+        Step 2 of OTP login flow. Verifies OTP code sent to phone
+        and returns JWT tokens on success.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtpLoginRequest'
+      responses:
+        '200':
+          description: OTP verified – login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokenResponse'
+        '401':
+          description: Invalid or expired OTP
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  # ─────────────────────────── OTP ───────────────────────────
+  /auth/request-otp:
+    post:
+      operationId: requestOtp
+      tags: [OTP]
+      summary: Request a new OTP code
+      description: |
+        Sends a 6-digit OTP to the recipient phone number.
+        OTP is valid for 5 minutes. Max 3 active OTPs per phone.
+        Stores hashed OTP in both PostgreSQL (otp_logs) and Redis (otp:{phone}).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtpRequestBody'
+      responses:
+        '200':
+          description: OTP sent successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OtpRequestResponse'
+        '429':
+          description: Too many OTP requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/verify-otp:
+    post:
+      operationId: verifyOtp
+      tags: [OTP]
+      summary: Verify an OTP code
+      description: |
+        Verifies a 6-digit OTP code against stored hash.
+        Max 5 attempts before OTP is invalidated.
+        On success for registration type, sets phone_verified = true.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OtpVerifyRequest'
+      responses:
+        '200':
+          description: OTP verified successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OtpVerifyResponse'
+        '401':
+          description: Invalid OTP code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: OTP expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          description: Max attempts exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Token ───────────────────────────
+  /auth/refresh-token:
+    post:
+      operationId: refreshToken
+      tags: [Token]
+      summary: Refresh access token
+      description: |
+        Exchanges a valid refresh token for a new access + refresh token pair.
+        Old refresh token is revoked (rotation). Session TTL is extended.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+                  description: Current refresh token
+      responses:
+        '200':
+          description: New token pair issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokenResponse'
+        '401':
+          description: Invalid or revoked refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/logout:
+    post:
+      operationId: logout
+      tags: [Login]
+      summary: Logout from current device
+      description: |
+        Invalidates the current session & refresh token.
+        Blacklists the access token JTI in Redis for its remaining lifetime.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        '200':
+          description: Logged out successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/logout-all:
+    post:
+      operationId: logoutAll
+      tags: [Login]
+      summary: Logout from all devices
+      description: |
+        Revokes all refresh tokens and blacklists all active JTIs.
+        Forces re-login on every device.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: All sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─────────────────────────── Session ───────────────────────────
+  /auth/sessions:
+    get:
+      operationId: listSessions
+      tags: [Session]
+      summary: List all active sessions for current user
+      description: |
+        Returns all active refresh tokens / sessions for the authenticated user,
+        including device info, IP, and last activity.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: List of active sessions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/sessions/{sessionId}:
+    delete:
+      operationId: revokeSession
+      tags: [Session]
+      summary: Revoke a specific session
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Session revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/sessions/revoke-all:
+    post:
+      operationId: revokeAllSessions
+      tags: [Session]
+      summary: Revoke all sessions (alternative to /auth/logout-all)
+      description: |
+        Same behavior as `/auth/logout-all` but under the sessions namespace.
+        Revokes all refresh tokens and blacklists all active JTIs.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: All sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─────────────────────────── Password ───────────────────────────
+  /auth/password/forgot:
+    post:
+      operationId: forgotPassword
+      tags: [Password]
+      summary: Request password reset OTP
+      description: Sends a password-reset OTP to the registered phone number.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone:
+                  type: string
+                  example: "+6281234567890"
+      responses:
+        '200':
+          description: Reset OTP sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OtpRequestResponse'
+        '404':
+          description: Phone number not registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /auth/password/reset:
+    post:
+      operationId: resetPassword
+      tags: [Password]
+      summary: Reset password using verified OTP token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordResetRequest'
+      responses:
+        '200':
+          description: Password reset successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          description: Invalid or expired reset token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /auth/password/change:
+    put:
+      operationId: changePassword
+      tags: [Password]
+      summary: Change password (authenticated)
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PasswordChangeRequest'
+      responses:
+        '200':
+          description: Password changed – all other sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: Current password incorrect
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Health ───────────────────────────
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: clay-auth-service
+                  timestamp:
+                    type: string
+                    format: date-time
+
+# ═══════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token (15 min TTL)
+
+  schemas:
+    # ── Request Schemas ──
+    RegisterRequest:
+      type: object
+      required: [email, phone, password, role]
+      properties:
+        email:
+          type: string
+          format: email
+          example: budi@example.com
+        phone:
+          type: string
+          pattern: '^\+62[0-9]{9,13}$'
+          example: "+6281234567890"
+        password:
+          type: string
+          format: password
+          minLength: 8
+          description: Min 8 chars, must contain uppercase, lowercase, and number
+        role:
+          type: string
+          enum: [user, driver, merchant]
+          example: user
+
+    LoginRequest:
+      type: object
+      required: [identifier, password]
+      properties:
+        identifier:
+          type: string
+          description: Email or phone number
+          example: budi@example.com
+        password:
+          type: string
+          format: password
+        device_id:
+          type: string
+          description: Unique device identifier for session tracking
+          example: "d4e5f6a7-b8c9-..."
+
+    OtpLoginRequest:
+      type: object
+      required: [phone, otp_code]
+      properties:
+        phone:
+          type: string
+          example: "+6281234567890"
+        otp_code:
+          type: string
+          pattern: '^\d{6}$'
+          example: "847291"
+        device_id:
+          type: string
+
+    OtpRequestBody:
+      type: object
+      required: [phone, type]
+      properties:
+        phone:
+          type: string
+          example: "+6281234567890"
+        type:
+          type: string
+          enum: [login, registration, reset]
+          description: Purpose of the OTP
+
+    OtpVerifyRequest:
+      type: object
+      required: [phone, otp_code, type]
+      properties:
+        phone:
+          type: string
+          example: "+6281234567890"
+        otp_code:
+          type: string
+          pattern: '^\d{6}$'
+        type:
+          type: string
+          enum: [login, registration, reset]
+
+    PasswordResetRequest:
+      type: object
+      required: [phone, reset_token, new_password]
+      properties:
+        phone:
+          type: string
+        reset_token:
+          type: string
+          description: Token received after OTP verification for reset
+        new_password:
+          type: string
+          format: password
+          minLength: 8
+
+    PasswordChangeRequest:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+          format: password
+        new_password:
+          type: string
+          format: password
+          minLength: 8
+
+    # ── Response Schemas ──
+    RegisterResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            user_id:
+              type: string
+              format: uuid
+            email:
+              type: string
+            phone:
+              type: string
+            role:
+              type: string
+            email_verified:
+              type: boolean
+              example: false
+            phone_verified:
+              type: boolean
+              example: false
+            otp_expires_in:
+              type: integer
+              description: OTP expiry in seconds
+              example: 300
+
+    AuthTokenResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            access_token:
+              type: string
+              description: JWT access token (15 min TTL)
+            refresh_token:
+              type: string
+              description: Opaque refresh token (30 day TTL)
+            token_type:
+              type: string
+              example: Bearer
+            expires_in:
+              type: integer
+              description: Access token TTL in seconds
+              example: 900
+            user:
+              type: object
+              properties:
+                id:
+                  type: string
+                  format: uuid
+                email:
+                  type: string
+                phone:
+                  type: string
+                role:
+                  type: string
+                  enum: [user, driver, merchant]
+                status:
+                  type: string
+                  enum: [active, suspended, deleted]
+
+    OtpRequestResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            message:
+              type: string
+              example: OTP sent to +6281234***890
+            expires_in:
+              type: integer
+              example: 300
+            retry_after:
+              type: integer
+              description: Seconds before user can request another OTP
+              example: 60
+
+    OtpVerifyResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            verified:
+              type: boolean
+              example: true
+            reset_token:
+              type: string
+              description: Only returned for type=reset, used in /password/reset
+              nullable: true
+
+    SessionListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                format: uuid
+              device_id:
+                type: string
+              ip_address:
+                type: string
+              user_agent:
+                type: string
+              scope:
+                type: string
+              created_at:
+                type: string
+                format: date-time
+              expires_at:
+                type: string
+                format: date-time
+              is_current:
+                type: boolean
+                description: Whether this is the session making the request
+
+    MessageResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: INVALID_CREDENTIALS
+            message:
+              type: string
+              example: Email or password is incorrect
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds until rate limit resets
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

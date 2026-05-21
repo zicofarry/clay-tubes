@@ -1,0 +1,56 @@
+version: '3.8'
+
+services:
+  postgres-food-order:
+    image: postgres:15-alpine
+    container_name: clay_food_order_postgres
+    environment:
+      POSTGRES_USER: clay_user
+      POSTGRES_PASSWORD: clay_password
+      POSTGRES_DB: clay_food_order
+    ports:
+      - "5447:5432"
+    volumes:
+      - postgres_food_order_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clay_user -d clay_food_order"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mongodb-food-order:
+    image: mongo:7-jammy
+    container_name: clay_food_order_mongo
+    environment:
+      MONGO_INITDB_DATABASE: clay_food_order
+    ports:
+      - "27021:27017"
+    volumes:
+      - mongodb_food_order_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-food-order:
+    image: redis:7-alpine
+    container_name: clay_food_order_redis
+    ports:
+      - "6387:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  adminer:
+    image: adminer
+    container_name: clay_food_order_adminer
+    restart: always
+    ports:
+      - "9017:8080"
+
+volumes:
+  postgres_food_order_data:
+  mongodb_food_order_data:

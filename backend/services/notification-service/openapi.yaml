@@ -1,0 +1,1089 @@
+openapi: 3.0.3
+info:
+  title: Clay Notification Service API
+  description: |
+    Orchestrates multi-channel notifications (push, SMS, email) for the Clay platform.
+    Acts as a central hub — receives events from Kafka, resolves templates,
+    checks user preferences, then delegates delivery to downstream services
+    (Push Service, SMS Service, Email Service).
+
+    **Database:**
+    - PostgreSQL — device tokens, notification logs, templates, user preferences
+
+    **Kafka Events Consumed:**
+    - `Order_Created` → push to user: "Sedang mencari driver..."
+    - `Driver_Found` → push to user with driver info (name, plate, ETA)
+    - `OTP_Requested` → OTP via FCM push or Twilio SMS
+    - `Order_Cancelled` → push to user & driver with cancellation reason
+    - `Trip_Completed` → trip receipt to user & driver, rating prompt
+    - `Order_Success` → receipt to user, earning summary to driver
+    - `Refund_Triggered` → push to user: "Refund berhasil dikembalikan"
+    - `Chat_Message_Sent` → push to recipient when app is in background
+
+    **Delivery Flow:**
+    ```
+    Kafka Event → Notification Service → resolve template
+                                       → check user_notif_prefs & quiet hours
+                                       → check device_tokens
+                                       → delegate to Push / SMS / Email Service
+                                       → log result to notification_logs
+    ```
+  version: 1.0.0
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://localhost:3011/api/v1
+    description: Local development
+  - url: https://api.clay.id/notification/v1
+    description: Production (via API Gateway)
+
+tags:
+  - name: Device Token
+    description: FCM/APNs device token registration
+  - name: Preference
+    description: User notification preferences & quiet hours
+  - name: Notification
+    description: Notification history & status
+  - name: Template
+    description: Notification template management (admin)
+  - name: Internal
+    description: Internal endpoints (service-to-service, not exposed to public)
+
+paths:
+  # ─────────────────────────── Device Token ───────────────────────────
+  /device-tokens:
+    post:
+      operationId: registerDeviceToken
+      tags: [Device Token]
+      summary: Register or update a device token
+      description: |
+        Called by the mobile app on startup and whenever the FCM/APNs token refreshes.
+        If a token already exists for this device, it updates the existing record.
+        If the token belongs to a different user (device switched accounts),
+        the old record is deactivated and a new one is created.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterDeviceTokenRequest'
+      responses:
+        '200':
+          description: Token registered or updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceTokenResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    get:
+      operationId: listMyDeviceTokens
+      tags: [Device Token]
+      summary: List registered device tokens for current user
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: is_active
+          in: query
+          description: Filter by active status
+          schema:
+            type: boolean
+          example: true
+      responses:
+        '200':
+          description: List of device tokens
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceTokenListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /device-tokens/{tokenId}:
+    delete:
+      operationId: deactivateDeviceToken
+      tags: [Device Token]
+      summary: Deactivate a device token (logout / uninstall)
+      description: |
+        Sets `is_active = false` for the specified token. Called when the user
+        logs out from a device or uninstalls the app.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TokenIdPath'
+      responses:
+        '200':
+          description: Token deactivated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Token not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Preference ───────────────────────────
+  /preferences:
+    get:
+      operationId: getMyPreferences
+      tags: [Preference]
+      summary: Get notification preferences
+      description: |
+        Returns the user's notification channel preferences and quiet hours.
+        If no preferences have been set, returns system defaults
+        (all channels enabled, no quiet hours).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Notification preferences
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenceResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    put:
+      operationId: updateMyPreferences
+      tags: [Preference]
+      summary: Update notification preferences
+      description: |
+        Updates channel toggles and quiet hours. During quiet hours,
+        only critical notifications (OTP, security alerts) are delivered.
+        Non-critical notifications are queued and sent after quiet hours end.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePreferenceRequest'
+      responses:
+        '200':
+          description: Preferences updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreferenceResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─────────────────────────── Notification ───────────────────────────
+  /notifications:
+    get:
+      operationId: listMyNotifications
+      tags: [Notification]
+      summary: List notification history for current user
+      description: |
+        Returns sent notifications sorted by newest first.
+        Can be filtered by event type and channel.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: event_type
+          in: query
+          description: Filter by event type
+          schema:
+            type: string
+          example: Trip_Completed
+        - name: channel
+          in: query
+          description: Filter by delivery channel
+          schema:
+            type: string
+            enum: [push, sms, email]
+        - name: status
+          in: query
+          description: Filter by delivery status
+          schema:
+            type: string
+            enum: [sent, failed, pending, queued]
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Paginated notification history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /notifications/{notificationId}:
+    get:
+      operationId: getNotification
+      tags: [Notification]
+      summary: Get notification detail
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/NotificationIdPath'
+      responses:
+        '200':
+          description: Notification detail with full payload
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Notification not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Template (Admin) ───────────────────────────
+  /admin/templates:
+    get:
+      operationId: listTemplates
+      tags: [Template]
+      summary: List all notification templates (admin)
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: event_type
+          in: query
+          schema:
+            type: string
+        - name: channel
+          in: query
+          schema:
+            type: string
+            enum: [push, sms, email]
+        - name: is_active
+          in: query
+          schema:
+            type: boolean
+      responses:
+        '200':
+          description: Template list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Admin role required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      operationId: createTemplate
+      tags: [Template]
+      summary: Create a notification template (admin)
+      description: |
+        Templates use Handlebars-style placeholders that are resolved
+        at send time using event payload data.
+
+        **Example:**
+        - Title: `"Driver sedang menuju ke kamu"`
+        - Body: `"{{driver_name}} ({{vehicle_plate}}) akan tiba dalam {{eta_seconds / 60}} menit"`
+
+        Constraint: `(event_type, channel)` must be unique.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTemplateRequest'
+      responses:
+        '201':
+          description: Template created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Admin role required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Template for this (event_type, channel) already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/templates/{templateId}:
+    get:
+      operationId: getTemplate
+      tags: [Template]
+      summary: Get template detail (admin)
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TemplateIdPath'
+      responses:
+        '200':
+          description: Template detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      operationId: updateTemplate
+      tags: [Template]
+      summary: Update a notification template (admin)
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TemplateIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateTemplateRequest'
+      responses:
+        '200':
+          description: Template updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TemplateResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: deleteTemplate
+      tags: [Template]
+      summary: Delete a notification template (admin)
+      description: Soft-deletes by setting `is_active = false`.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TemplateIdPath'
+      responses:
+        '200':
+          description: Template deactivated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /admin/templates/{templateId}/preview:
+    post:
+      operationId: previewTemplate
+      tags: [Template]
+      summary: Preview a template with sample data (admin)
+      description: |
+        Renders the template with provided sample data to preview
+        the final notification text before deploying.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TemplateIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sample_data]
+              properties:
+                sample_data:
+                  type: object
+                  description: Key-value pairs matching template placeholders
+                  example:
+                    driver_name: "Budi Santoso"
+                    vehicle_plate: "D 1234 ABC"
+                    eta_seconds: 180
+      responses:
+        '200':
+          description: Rendered preview
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    properties:
+                      rendered_title:
+                        type: string
+                        example: "Driver sedang menuju ke kamu"
+                      rendered_body:
+                        type: string
+                        example: "Budi Santoso (D 1234 ABC) akan tiba dalam 3 menit"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Template not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Internal ───────────────────────────
+  /internal/send:
+    post:
+      operationId: internalSendNotification
+      tags: [Internal]
+      summary: Send a notification (service-to-service)
+      description: |
+        Called by other services or by the Kafka consumer handler to send
+        a notification directly. Resolves template, checks preferences,
+        and delegates to the appropriate channel service.
+
+        **Priority levels:**
+        - `critical` — always delivered (OTP, security alerts). Ignores quiet hours.
+        - `high` — delivered immediately but respects quiet hours.
+        - `normal` — standard delivery with batching allowed.
+        - `low` — can be delayed or batched for digest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalSendRequest'
+      responses:
+        '200':
+          description: Notification dispatched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalSendResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          description: No active template found for event_type + channel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/send/batch:
+    post:
+      operationId: internalSendBatch
+      tags: [Internal]
+      summary: Send notifications to multiple recipients
+      description: |
+        Batch send for events that target multiple users
+        (e.g., Order_Cancelled notifies both user and driver).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [notifications]
+              properties:
+                notifications:
+                  type: array
+                  maxItems: 100
+                  items:
+                    $ref: '#/components/schemas/InternalSendRequest'
+      responses:
+        '200':
+          description: Batch dispatched
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    properties:
+                      total:
+                        type: integer
+                        example: 2
+                      sent:
+                        type: integer
+                        example: 2
+                      failed:
+                        type: integer
+                        example: 0
+                      results:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/InternalSendResponse'
+
+  /internal/device-tokens/{userId}:
+    get:
+      operationId: internalGetDeviceTokens
+      tags: [Internal]
+      summary: Get active device tokens for a user (service-to-service)
+      description: Called by Push Service to get FCM/APNs tokens for delivery.
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Active tokens
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceTokenListResponse'
+
+  # ─────────────────────────── Health ───────────────────────────
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: clay-notification-service
+                  queued_notifications:
+                    type: integer
+                    description: Number of notifications pending delivery
+                    example: 12
+                  timestamp:
+                    type: string
+                    format: date-time
+
+# ═══════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token (15 min TTL)
+
+  parameters:
+    TokenIdPath:
+      name: tokenId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Device token UUID
+    NotificationIdPath:
+      name: notificationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Notification log UUID
+    TemplateIdPath:
+      name: templateId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Notification template UUID
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 50
+
+  schemas:
+    # ── Request Schemas ───────────────────────────────────────────
+    RegisterDeviceTokenRequest:
+      type: object
+      required: [token, platform]
+      properties:
+        token:
+          type: string
+          description: FCM or APNs device token
+          example: "dGhpcyBpcyBhIGZjbSB0b2tlbg..."
+        platform:
+          type: string
+          enum: [ios, android, web]
+          example: android
+        app_version:
+          type: string
+          description: App version for targeting
+          example: "2.4.1"
+
+    UpdatePreferenceRequest:
+      type: object
+      properties:
+        push_enabled:
+          type: boolean
+          description: Enable/disable push notifications
+          example: true
+        email_enabled:
+          type: boolean
+          description: Enable/disable email notifications
+          example: true
+        sms_enabled:
+          type: boolean
+          description: Enable/disable SMS notifications
+          example: false
+        quiet_hours_start:
+          type: string
+          format: time
+          nullable: true
+          description: Start of quiet hours (local time). Set null to disable.
+          example: "23:00"
+        quiet_hours_end:
+          type: string
+          format: time
+          nullable: true
+          description: End of quiet hours (local time)
+          example: "07:00"
+
+    CreateTemplateRequest:
+      type: object
+      required: [event_type, channel, body_template]
+      properties:
+        event_type:
+          type: string
+          description: |
+            Kafka event type this template handles.
+            Must match exactly with the `event_type` field in the Kafka payload.
+          example: "Driver_Found"
+        channel:
+          type: string
+          enum: [push, sms, email]
+          example: push
+        title_template:
+          type: string
+          description: |
+            Handlebars template for notification title.
+            Only used for push and email channels. SMS ignores this.
+          example: "Driver sedang menuju ke kamu"
+        body_template:
+          type: string
+          description: |
+            Handlebars template for notification body.
+            Available variables come from the Kafka event payload.
+          example: "{{driver_name}} ({{vehicle_plate}}) akan tiba dalam {{eta_minutes}} menit"
+
+    UpdateTemplateRequest:
+      type: object
+      properties:
+        title_template:
+          type: string
+        body_template:
+          type: string
+        is_active:
+          type: boolean
+
+    InternalSendRequest:
+      type: object
+      required: [recipient_id, event_type, channel, payload]
+      properties:
+        recipient_id:
+          type: string
+          format: uuid
+          description: Target user UUID
+          example: "usr_abc123-..."
+        event_type:
+          type: string
+          description: Event type to resolve template
+          example: "Driver_Found"
+        channel:
+          type: string
+          enum: [push, sms, email]
+          example: push
+        priority:
+          type: string
+          enum: [critical, high, normal, low]
+          default: normal
+          description: Delivery priority level
+        payload:
+          type: object
+          description: |
+            Event data used to render the template.
+            Keys must match Handlebars placeholders in the template.
+          example:
+            order_id: "ord_x9y8z7-..."
+            driver_name: "Budi Santoso"
+            driver_phone: "081234567890"
+            vehicle_plate: "D 1234 ABC"
+            vehicle_type: "motor"
+            eta_seconds: 180
+        override_title:
+          type: string
+          nullable: true
+          description: Override template title (skip template resolution)
+        override_body:
+          type: string
+          nullable: true
+          description: Override template body (skip template resolution)
+
+    # ── Entity Schemas ────────────────────────────────────────────
+    DeviceToken:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: "tok_a1b2c3-..."
+        user_id:
+          type: string
+          format: uuid
+          example: "usr_abc123-..."
+        token:
+          type: string
+          description: FCM/APNs token (masked in response)
+          example: "dGhpc...***"
+        platform:
+          type: string
+          enum: [ios, android, web]
+          example: android
+        app_version:
+          type: string
+          example: "2.4.1"
+        is_active:
+          type: boolean
+          example: true
+        updated_at:
+          type: string
+          format: date-time
+
+    NotificationPreference:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        push_enabled:
+          type: boolean
+          example: true
+        email_enabled:
+          type: boolean
+          example: true
+        sms_enabled:
+          type: boolean
+          example: false
+        quiet_hours_start:
+          type: string
+          format: time
+          nullable: true
+          example: "23:00"
+        quiet_hours_end:
+          type: string
+          format: time
+          nullable: true
+          example: "07:00"
+        updated_at:
+          type: string
+          format: date-time
+
+    NotificationLog:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        recipient_id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          example: "Driver_Found"
+        channel:
+          type: string
+          enum: [push, sms, email]
+        payload:
+          type: object
+          description: Original event data
+        rendered_title:
+          type: string
+          example: "Driver sedang menuju ke kamu"
+        rendered_body:
+          type: string
+          example: "Budi Santoso (D 1234 ABC) akan tiba dalam 3 menit"
+        status:
+          type: string
+          enum: [sent, failed, pending, queued]
+          example: sent
+        error_message:
+          type: string
+          nullable: true
+          description: Error detail if status is failed
+        sent_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    NotificationTemplate:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        event_type:
+          type: string
+          example: "Driver_Found"
+        channel:
+          type: string
+          enum: [push, sms, email]
+        title_template:
+          type: string
+          nullable: true
+        body_template:
+          type: string
+        is_active:
+          type: boolean
+        updated_at:
+          type: string
+          format: date-time
+
+    # ── Response Schemas ──────────────────────────────────────────
+    DeviceTokenResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/DeviceToken'
+
+    DeviceTokenListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeviceToken'
+
+    PreferenceResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/NotificationPreference'
+
+    NotificationResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/NotificationLog'
+
+    NotificationListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationLog'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    TemplateResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/NotificationTemplate'
+
+    TemplateListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/NotificationTemplate'
+
+    InternalSendResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            notification_id:
+              type: string
+              format: uuid
+            recipient_id:
+              type: string
+              format: uuid
+            channel:
+              type: string
+            delivery_status:
+              type: string
+              enum: [sent, queued, failed, skipped]
+              description: |
+                - `sent` — delivered to channel service
+                - `queued` — in quiet hours, will send later
+                - `failed` — delivery error
+                - `skipped` — user disabled this channel
+            reason:
+              type: string
+              nullable: true
+              description: Explanation for queued/failed/skipped
+              example: null
+
+    # ── Common Schemas ────────────────────────────────────────────
+    PaginationMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 20
+        total:
+          type: integer
+        total_pages:
+          type: integer
+
+    MessageResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: TOKEN_NOT_FOUND
+            message:
+              type: string
+              example: Device token with the given ID was not found
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'

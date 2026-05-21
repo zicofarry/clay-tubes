@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  postgres-user:
+    image: postgres:15-alpine
+    container_name: clay_user_postgres
+    environment:
+      POSTGRES_USER: clay_user
+      POSTGRES_PASSWORD: clay_password
+      POSTGRES_DB: user_db
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_user_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U clay_user -d user_db" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis-user:
+    image: redis:7-alpine
+    container_name: clay_user_redis
+    ports:
+      - "6372:6379"
+
+  adminer:
+    image: adminer
+    container_name: clay_user_adminer
+    restart: always
+    ports:
+      - "9002:8080"
+
+volumes:
+  postgres_user_data:

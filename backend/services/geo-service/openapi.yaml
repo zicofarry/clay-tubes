@@ -1,0 +1,1157 @@
+openapi: "3.0.3"
+info:
+  title: Clay Geo Service
+  version: "1.0.0"
+  description: |
+    Geospatial service for Clay superapp. Manages real-time driver locations,
+    proximity searches, and geofencing.
+
+    ## Responsibilities
+    - Stores and indexes driver GPS positions using Redis Geo commands
+    - Answers "find nearby drivers" queries for the Matching Service
+    - **Maps API abstraction layer** — proxies Google Maps / HERE / OSM:
+      - Route estimation (distance, ETA, fare components)
+      - Polyline generation for map rendering
+      - Turn-by-turn routing with maneuver instructions
+      - GPS snapping (road correction for noisy GPS data)
+      - Real-time traffic data for accurate ETA
+    - Geocoding (forward & reverse)
+    - Place autocomplete for pickup/destination search UI
+    - Geofencing: check if a point is inside a defined zone
+    - **Live ETA tracking** — maintains real-time ETA for active orders
+
+    ## Storage
+    - **Redis Geo** (`GEOADD`, `GEORADIUS`): `geo:drivers:{service_type}` — driver positions
+      - Key: `geo:drivers:ride`, `geo:drivers:delivery`, `geo:drivers:food`
+      - TTL refreshed on each location update; driver removed on `offline` status
+    - **Redis Hash**: `eta:{driver_id}:{order_id}` — live ETA cache (TTL 1h)
+    - **PostgreSQL**: saved places, geofence zone definitions
+
+    ## External Integrations
+    - Google Maps Platform (Directions API, Geocoding API, Places API, Roads API)
+    - HERE Maps (traffic data, routing fallback)
+    - Configurable to use OpenStreetMap/Nominatim as fallback
+
+    ## Kafka Events
+    ### Consumed
+    - `driver.location.updated` → update Redis Geo position
+    - `order.driver_assigned` → initialize live ETA tracking
+    - `order.completed` / `order.cancelled` → cleanup ETA cache
+
+servers:
+  - url: http://clay-geo-service:8080
+    description: Internal service (not exposed via API Gateway for driver location writes)
+
+tags:
+  - name: Location
+    description: Driver location management
+  - name: Maps
+    description: Route estimation, polyline, routing, snapping, traffic
+  - name: Geocoding
+    description: Address ↔ coordinates conversion
+  - name: Places
+    description: Place search and autocomplete
+  - name: Geofence
+    description: Zone check and management
+  - name: Internal
+    description: Service-to-service endpoints
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  # ── Location ─────────────────────────────────────────────────────────────
+
+  /drivers/{driverId}/location:
+    put:
+      summary: Update driver GPS location
+      operationId: updateDriverLocation
+      tags: [Location]
+      description: |
+        Called by driver app every 3–5 seconds while on a trip or online.
+        Writes to `geo:drivers:{service_type}` in Redis.
+      parameters:
+        - $ref: "#/components/parameters/DriverId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateLocationRequest"
+      responses:
+        "200":
+          description: Location updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+    get:
+      summary: Get current driver location
+      operationId: getDriverLocation
+      tags: [Location]
+      description: Returns the last known position of a driver. Used by user app to show driver on map.
+      parameters:
+        - $ref: "#/components/parameters/DriverId"
+      responses:
+        "200":
+          description: Driver location
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriverLocation"
+        "404":
+          description: Driver not online or location unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /drivers/nearby:
+    get:
+      summary: Find nearby available drivers
+      operationId: findNearbyDrivers
+      tags: [Location]
+      description: |
+        Core matching query. Uses Redis `GEORADIUS` to find drivers within radius.
+        Returns drivers sorted by distance ascending.
+      parameters:
+        - name: lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: lng
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: radius_km
+          in: query
+          schema:
+            type: number
+            format: double
+            default: 5.0
+        - name: service_type
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/ServiceType"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+            maximum: 50
+      responses:
+        "200":
+          description: Nearby drivers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NearbyDriversResponse"
+
+  # ── Maps ───────────────────────────────────────────────────────────────────
+
+  /maps/estimate:
+    post:
+      summary: Estimate route, distance, ETA, and fare
+      operationId: estimateRoute
+      tags: [Maps]
+      description: |
+        Computes route-based distance, estimated travel time (ETA),
+        and fare components. Used by order services before creating an order.
+        Calls Google Maps Directions API under the hood.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RouteEstimateRequest"
+      responses:
+        "200":
+          description: Route estimate calculated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteEstimateResponse"
+        "400":
+          description: Invalid coordinates
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /maps/polyline:
+    get:
+      summary: Get encoded polyline between two points
+      operationId: getPolyline
+      tags: [Maps]
+      description: |
+        Returns an encoded polyline string for rendering the route on a map.
+        Uses Google Maps Directions API.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: origin_lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: origin_lng
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: dest_lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: dest_lng
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+      responses:
+        "200":
+          description: Encoded polyline
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolylineResponse"
+
+  /maps/routing:
+    get:
+      summary: Get full route with turn-by-turn instructions
+      operationId: getRouting
+      tags: [Maps]
+      description: |
+        Returns complete route with step-by-step maneuver instructions,
+        distance per step, and polyline per leg. Used by driver app
+        for navigation.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: origin_lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: origin_lng
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: dest_lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: dest_lng
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum: [driving, walking, bicycling]
+            default: driving
+      responses:
+        "200":
+          description: Full route with instructions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RoutingResponse"
+
+  /maps/snapping:
+    post:
+      summary: Snap GPS coordinates to nearest road
+      operationId: snapToRoad
+      tags: [Maps]
+      description: |
+        Corrects noisy GPS coordinates to the nearest road segment.
+        Accepts a batch of points (e.g., from driver's recent GPS trail)
+        and returns snapped coordinates. Uses Google Roads API.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SnappingRequest"
+      responses:
+        "200":
+          description: Snapped coordinates
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SnappingResponse"
+
+  /maps/traffic:
+    get:
+      summary: Get real-time traffic data for a route
+      operationId: getTraffic
+      tags: [Maps]
+      description: |
+        Returns traffic conditions along a route: congestion levels,
+        estimated delay, and speed data per road segment.
+        Used by Pricing Service for surge calculation and by
+        the driver app for ETA accuracy.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: origin_lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: origin_lng
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: dest_lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: dest_lng
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+      responses:
+        "200":
+          description: Traffic data along route
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrafficResponse"
+
+  # ── Geocoding ─────────────────────────────────────────────────────────────
+
+  /maps/geocode:
+    post:
+      summary: Forward geocode (address → lat/lng)
+      operationId: forwardGeocode
+      tags: [Geocoding]
+      description: Converts a text address to coordinates.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address]
+              properties:
+                address:
+                  type: string
+                  example: "Gedung Sate, Bandung"
+      responses:
+        "200":
+          description: Geocode results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForwardGeocodeResponse"
+
+  /maps/reverse-geocode:
+    post:
+      summary: Reverse geocode (lat/lng → address)
+      operationId: reverseGeocode
+      tags: [Geocoding]
+      description: Converts coordinates to a human-readable address.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [lat, lng]
+              properties:
+                lat:
+                  type: number
+                  format: double
+                lng:
+                  type: number
+                  format: double
+      responses:
+        "200":
+          description: Address result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeocodeResult"
+        "422":
+          description: Coordinates out of range
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+
+  /distance:
+    get:
+      summary: Calculate straight-line distance between two points
+      operationId: calculateDistance
+      tags: [Geocoding]
+      description: Uses Haversine formula. For route distance use Tracking/Maps Service.
+      parameters:
+        - name: origin_lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: origin_lng
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: dest_lat
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+        - name: dest_lng
+          in: query
+          required: true
+          schema:
+            type: number
+            format: double
+      responses:
+        "200":
+          description: Distance result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DistanceResponse"
+
+  # ── Places ────────────────────────────────────────────────────────────────
+
+  /maps/places/autocomplete:
+    get:
+      summary: Place search autocomplete
+      operationId: placesAutocomplete
+      tags: [Places]
+      description: Proxies Google Places Autocomplete API. Used for pickup/destination input.
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema:
+            type: string
+            example: "Universitas Telkom"
+        - name: lat
+          in: query
+          schema:
+            type: number
+            format: double
+            description: Bias results toward this location
+        - name: lng
+          in: query
+          schema:
+            type: number
+            format: double
+        - name: radius_m
+          in: query
+          schema:
+            type: integer
+            default: 50000
+      responses:
+        "200":
+          description: Autocomplete suggestions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutocompleteResponse"
+
+  /maps/places/details:
+    get:
+      summary: Get place details by Google Place ID
+      operationId: getPlaceDetail
+      tags: [Places]
+      parameters:
+        - name: placeId
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Place details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlaceDetail"
+        "404":
+          description: Place not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  # ── Geofence ──────────────────────────────────────────────────────────────
+
+  /geofence/check:
+    post:
+      summary: Check if a point falls inside any geofence zone
+      operationId: checkGeofence
+      tags: [Geofence]
+      description: |
+        Used to validate pickup/drop-off points against restricted zones
+        (airport surcharge zones, no-pickup zones, etc.).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeofenceCheckRequest"
+      responses:
+        "200":
+          description: Geofence check result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeofenceCheckResponse"
+
+  # ── Internal ──────────────────────────────────────────────────────────────
+
+  /internal/drivers/locations/batch:
+    post:
+      summary: Batch get driver locations
+      operationId: batchGetDriverLocations
+      tags: [Internal]
+      description: Efficient bulk location fetch for the Tracking Service.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BatchLocationRequest"
+      responses:
+        "200":
+          description: Batch location results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BatchLocationResponse"
+
+  /internal/maps/eta/{driverId}/{orderId}:
+    get:
+      summary: Get live ETA for driver to pickup/destination
+      operationId: getDriverEta
+      tags: [Internal]
+      description: |
+        Returns the current ETA for a driver heading to either
+        the pickup point or delivery destination.
+        Called by Tracking Service to display ETA to user.
+      parameters:
+        - name: driverId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Current ETA
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LiveEtaResponse"
+        "404":
+          description: No active ETA tracking for this driver/order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      summary: Update live ETA during trip
+      operationId: updateDriverEta
+      tags: [Internal]
+      description: |
+        Called by Tracking Service or driver location update handler
+        to recalculate and update the ETA as the driver progresses.
+        Stores in Redis `eta:{driver_id}:{order_id}` with TTL 1h.
+      parameters:
+        - name: driverId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: orderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateEtaRequest"
+      responses:
+        "200":
+          description: ETA updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LiveEtaResponse"
+
+components:
+  parameters:
+    DriverId:
+      name: driverId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    # ── Enums ────────────────────────────────────────────────────────────────
+
+    ServiceType:
+      type: string
+      enum: [ride, delivery, food]
+
+    ZoneType:
+      type: string
+      enum: [airport_surcharge, no_pickup, surge_pricing, restricted]
+
+    # ── Location ──────────────────────────────────────────────────────────────
+
+    UpdateLocationRequest:
+      type: object
+      required: [lat, lng, service_type]
+      properties:
+        lat:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+        lng:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+        service_type:
+          $ref: "#/components/schemas/ServiceType"
+        bearing:
+          type: number
+          format: double
+          description: Direction of travel in degrees (0–360)
+        speed_kmh:
+          type: number
+          format: double
+
+    DriverLocation:
+      type: object
+      properties:
+        driver_id:
+          type: string
+          format: uuid
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        bearing:
+          type: number
+          format: double
+        speed_kmh:
+          type: number
+          format: double
+        updated_at:
+          type: string
+          format: date-time
+
+    NearbyDriversResponse:
+      type: object
+      properties:
+        drivers:
+          type: array
+          items:
+            $ref: "#/components/schemas/NearbyDriver"
+        total:
+          type: integer
+
+    NearbyDriver:
+      type: object
+      properties:
+        driver_id:
+          type: string
+          format: uuid
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        distance_km:
+          type: number
+          format: double
+        bearing:
+          type: number
+          format: double
+
+    # ── Geocoding ─────────────────────────────────────────────────────────────
+
+    GeocodeResult:
+      type: object
+      properties:
+        formatted_address:
+          type: string
+          example: "Jl. Telekomunikasi No.1, Bandung, Jawa Barat 40257"
+        place_name:
+          type: string
+          example: "Universitas Telkom"
+        city:
+          type: string
+        province:
+          type: string
+        postal_code:
+          type: string
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+
+    ForwardGeocodeResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: "#/components/schemas/GeocodeResult"
+
+    DistanceResponse:
+      type: object
+      properties:
+        distance_km:
+          type: number
+          format: double
+        distance_m:
+          type: number
+          format: double
+
+    # ── Places ────────────────────────────────────────────────────────────────
+
+    AutocompleteResponse:
+      type: object
+      properties:
+        predictions:
+          type: array
+          items:
+            $ref: "#/components/schemas/PlacePrediction"
+
+    PlacePrediction:
+      type: object
+      properties:
+        place_id:
+          type: string
+          description: Google Place ID for use in /places/{placeId}
+        description:
+          type: string
+          example: "Universitas Telkom, Bandung, Jawa Barat, Indonesia"
+        main_text:
+          type: string
+          example: "Universitas Telkom"
+        secondary_text:
+          type: string
+          example: "Bandung, Jawa Barat, Indonesia"
+
+    PlaceDetail:
+      type: object
+      properties:
+        place_id:
+          type: string
+        name:
+          type: string
+        formatted_address:
+          type: string
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        types:
+          type: array
+          items:
+            type: string
+
+    # ── Geofence ──────────────────────────────────────────────────────────────
+
+    GeofenceCheckRequest:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+
+    GeofenceCheckResponse:
+      type: object
+      properties:
+        inside_zones:
+          type: array
+          items:
+            $ref: "#/components/schemas/GeofenceZone"
+        is_restricted:
+          type: boolean
+
+    GeofenceZone:
+      type: object
+      properties:
+        zone_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: "Bandara Husein Sastranegara"
+        type:
+          $ref: "#/components/schemas/ZoneType"
+        surcharge_amount:
+          type: integer
+          nullable: true
+          description: IDR surcharge amount, only present for airport_surcharge type
+
+    # ── Batch ─────────────────────────────────────────────────────────────────
+
+    BatchLocationRequest:
+      type: object
+      required: [driver_ids]
+      properties:
+        driver_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          maxItems: 100
+
+    BatchLocationResponse:
+      type: object
+      properties:
+        locations:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/DriverLocation"
+          description: Map of driver_id → DriverLocation
+
+    # ── Common ────────────────────────────────────────────────────────────────
+
+    SuccessResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        version:
+          type: string
+
+    # ── Maps ─────────────────────────────────────────────────────────────────
+
+    RouteEstimateRequest:
+      type: object
+      required: [origin, destination]
+      properties:
+        origin:
+          $ref: "#/components/schemas/LatLng"
+        destination:
+          $ref: "#/components/schemas/LatLng"
+        service_type:
+          $ref: "#/components/schemas/ServiceType"
+        departure_time:
+          type: string
+          format: date-time
+          description: For traffic-aware ETA (defaults to now)
+
+    RouteEstimateResponse:
+      type: object
+      properties:
+        distance_km:
+          type: number
+          format: double
+          example: 8.4
+        distance_m:
+          type: integer
+          example: 8400
+        duration_seconds:
+          type: integer
+          description: Estimated travel time in seconds
+          example: 1260
+        duration_text:
+          type: string
+          example: "21 menit"
+        polyline:
+          type: string
+          description: Encoded polyline for map rendering
+        traffic_level:
+          type: string
+          enum: [low, moderate, heavy, severe]
+
+    PolylineResponse:
+      type: object
+      properties:
+        polyline:
+          type: string
+          description: Google encoded polyline string
+        distance_km:
+          type: number
+          format: double
+        duration_seconds:
+          type: integer
+
+    RoutingResponse:
+      type: object
+      properties:
+        distance_km:
+          type: number
+          format: double
+        duration_seconds:
+          type: integer
+        polyline:
+          type: string
+        steps:
+          type: array
+          items:
+            $ref: "#/components/schemas/RouteStep"
+
+    RouteStep:
+      type: object
+      properties:
+        instruction:
+          type: string
+          example: "Belok kiri ke Jl. Sudirman"
+        maneuver:
+          type: string
+          enum: [turn-left, turn-right, straight, u-turn, merge, fork-left, fork-right, roundabout, arrive]
+        distance_m:
+          type: integer
+          example: 350
+        duration_seconds:
+          type: integer
+          example: 45
+        start_lat:
+          type: number
+          format: double
+        start_lng:
+          type: number
+          format: double
+        end_lat:
+          type: number
+          format: double
+        end_lng:
+          type: number
+          format: double
+        polyline:
+          type: string
+          description: Polyline for this step only
+
+    SnappingRequest:
+      type: object
+      required: [points]
+      properties:
+        points:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/LatLng"
+        interpolate:
+          type: boolean
+          default: true
+          description: Whether to interpolate points along the road between inputs
+
+    SnappingResponse:
+      type: object
+      properties:
+        snapped_points:
+          type: array
+          items:
+            type: object
+            properties:
+              original:
+                $ref: "#/components/schemas/LatLng"
+              snapped:
+                $ref: "#/components/schemas/LatLng"
+              road_name:
+                type: string
+                nullable: true
+                example: "Jl. Telekomunikasi"
+              speed_limit_kmh:
+                type: integer
+                nullable: true
+
+    TrafficResponse:
+      type: object
+      properties:
+        overall_level:
+          type: string
+          enum: [low, moderate, heavy, severe]
+        delay_seconds:
+          type: integer
+          description: Extra time due to traffic vs free-flow
+          example: 420
+        free_flow_duration_seconds:
+          type: integer
+          example: 840
+        traffic_duration_seconds:
+          type: integer
+          description: Actual estimated duration with traffic
+          example: 1260
+        segments:
+          type: array
+          items:
+            type: object
+            properties:
+              road_name:
+                type: string
+                example: "Jl. Buah Batu"
+              level:
+                type: string
+                enum: [low, moderate, heavy, severe]
+              speed_kmh:
+                type: number
+                format: double
+              free_flow_speed_kmh:
+                type: number
+                format: double
+              length_m:
+                type: integer
+
+    LatLng:
+      type: object
+      required: [lat, lng]
+      properties:
+        lat:
+          type: number
+          format: double
+          minimum: -90
+          maximum: 90
+        lng:
+          type: number
+          format: double
+          minimum: -180
+          maximum: 180
+
+    # ── Live ETA ─────────────────────────────────────────────────────────────
+
+    LiveEtaResponse:
+      type: object
+      properties:
+        driver_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        eta_seconds:
+          type: integer
+          description: Estimated remaining time in seconds
+          example: 480
+        eta_text:
+          type: string
+          example: "8 menit"
+        distance_remaining_km:
+          type: number
+          format: double
+          example: 3.2
+        destination_type:
+          type: string
+          enum: [pickup, delivery]
+          description: Whether driver is heading to pickup or final destination
+        updated_at:
+          type: string
+          format: date-time
+
+    UpdateEtaRequest:
+      type: object
+      required: [eta_seconds, distance_remaining_km, destination_type]
+      properties:
+        eta_seconds:
+          type: integer
+        distance_remaining_km:
+          type: number
+          format: double
+        destination_type:
+          type: string
+          enum: [pickup, delivery]
+        driver_lat:
+          type: number
+          format: double
+        driver_lng:
+          type: number
+          format: double
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

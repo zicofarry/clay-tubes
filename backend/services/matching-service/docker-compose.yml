@@ -1,0 +1,30 @@
+version: '3.8'
+
+# clay-matching-service is fully Redis-based (no PostgreSQL).
+# Per PORT_MAPPING.md: app=8010, redis=6380, no Adminer slot assigned.
+# Adminer doesn't support Redis, so we expose redis-commander on 9010
+# (following the App+1000 web-UI port convention) for browser-based key inspection.
+
+services:
+  redis-matching:
+    image: redis:7-alpine
+    container_name: clay_matching_redis
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: clay_matching_redis_ui
+    restart: always
+    ports:
+      - "9010:8081"
+    environment:
+      REDIS_HOSTS: "matching:redis-matching:6379"
+    depends_on:
+      redis-matching:
+        condition: service_healthy

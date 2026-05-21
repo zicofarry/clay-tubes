@@ -1,0 +1,1475 @@
+openapi: 3.0.3
+info:
+  title: Clay Merchant & Catalog Service API
+  description: |
+    Merchant onboarding, profile management, operating hours, and menu catalog
+    for the Clay platform.
+
+    **Database:**
+    - PostgreSQL — merchant relational data (profile, operating hours, bank accounts)
+    - MongoDB — menu catalog (categories, items with flexible variants & add-ons)
+
+    **Cache:**
+    - Menu catalog changes published to Kafka → consumed by Search Service for indexing
+
+    **Kafka Events Produced:**
+    - `Merchant_Updated` — when merchant profile/status changes (consumed by Search)
+    - `Menu_Updated` — when menu items change (consumed by Search)
+  version: 1.0.0
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://localhost:3005/api/v1
+    description: Local development
+  - url: https://api.clay.id/merchant/v1
+    description: Production (via API Gateway)
+
+tags:
+  - name: Merchant
+    description: Merchant registration & profile management
+  - name: Operating Hours
+    description: Merchant operating schedule
+  - name: Bank Account
+    description: Merchant bank account for settlement
+  - name: Menu Category
+    description: Menu category management
+  - name: Menu Item
+    description: Menu item CRUD with variants & add-ons
+  - name: Internal
+    description: Internal endpoints (called by other services, not exposed to public)
+
+paths:
+  # ─────────────────────────── Merchant ───────────────────────────
+  /merchants:
+    post:
+      operationId: registerMerchant
+      tags: [Merchant]
+      summary: Register a new merchant
+      description: |
+        Registers a new merchant account linked to the authenticated user.
+        Sets initial status to `pending_review`. Merchant can only accept orders
+        after status is set to `active` by admin.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterMerchantRequest'
+      responses:
+        '201':
+          description: Merchant registered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchantResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: User already has a registered merchant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /merchants/me:
+    get:
+      operationId: getMyMerchant
+      tags: [Merchant]
+      summary: Get authenticated merchant's profile
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Merchant profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchantResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Merchant profile not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      operationId: updateMyMerchant
+      tags: [Merchant]
+      summary: Update merchant profile
+      description: |
+        Updates merchant profile fields. Triggers `Merchant_Updated` Kafka event
+        so Search Service can re-index.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMerchantRequest'
+      responses:
+        '200':
+          description: Merchant profile updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchantResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Merchant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /merchants/{merchantId}:
+    get:
+      operationId: getMerchantById
+      tags: [Merchant]
+      summary: Get merchant public profile by ID
+      description: |
+        Returns public merchant information including operating hours.
+        Used by user app to display merchant detail page.
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+      responses:
+        '200':
+          description: Merchant public profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchantPublicResponse'
+        '404':
+          description: Merchant not found or inactive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /merchants/{merchantId}/status:
+    patch:
+      operationId: updateMerchantStatus
+      tags: [Merchant]
+      summary: Update merchant open/close status
+      description: |
+        Allows merchant to toggle between `active` and `closed`.
+        Admin can also set `suspended`. Triggers `Merchant_Updated` Kafka event.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status:
+                  type: string
+                  enum: [active, closed]
+                  example: closed
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchantResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not owner of this merchant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Merchant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Operating Hours ───────────────────────────
+  /merchants/{merchantId}/operating-hours:
+    get:
+      operationId: getOperatingHours
+      tags: [Operating Hours]
+      summary: Get merchant operating hours
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+      responses:
+        '200':
+          description: List of operating hours per day
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatingHoursListResponse'
+        '404':
+          description: Merchant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      operationId: upsertOperatingHours
+      tags: [Operating Hours]
+      summary: Set operating hours for all days
+      description: |
+        Replaces the entire operating hours schedule for the merchant.
+        Send all 7 days (0=Sunday to 6=Saturday). Use `is_closed: true`
+        to mark a day as closed.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpsertOperatingHoursRequest'
+      responses:
+        '200':
+          description: Operating hours updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperatingHoursListResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not owner of this merchant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Bank Account ───────────────────────────
+  /merchants/{merchantId}/bank-accounts:
+    get:
+      operationId: listBankAccounts
+      tags: [Bank Account]
+      summary: List merchant bank accounts
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+      responses:
+        '200':
+          description: List of bank accounts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankAccountListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Forbidden — not owner of this merchant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      operationId: addBankAccount
+      tags: [Bank Account]
+      summary: Add a bank account
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddBankAccountRequest'
+      responses:
+        '201':
+          description: Bank account added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankAccountResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Account number already registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /merchants/{merchantId}/bank-accounts/{accountId}:
+    delete:
+      operationId: deleteBankAccount
+      tags: [Bank Account]
+      summary: Delete a bank account
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Bank account deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: Cannot delete primary account while there are pending settlements
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Bank account not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /merchants/{merchantId}/bank-accounts/{accountId}/set-primary:
+    patch:
+      operationId: setPrimaryBankAccount
+      tags: [Bank Account]
+      summary: Set a bank account as primary
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+        - name: accountId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Primary bank account updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BankAccountResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Bank account not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Menu Category ───────────────────────────
+  /merchants/{merchantId}/menu/categories:
+    get:
+      operationId: listMenuCategories
+      tags: [Menu Category]
+      summary: List all menu categories
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+      responses:
+        '200':
+          description: List of menu categories
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuCategoryListResponse'
+        '404':
+          description: Merchant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      operationId: createMenuCategory
+      tags: [Menu Category]
+      summary: Create a new menu category
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMenuCategoryRequest'
+      responses:
+        '201':
+          description: Category created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuCategoryResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /merchants/{merchantId}/menu/categories/{categoryId}:
+    put:
+      operationId: updateMenuCategory
+      tags: [Menu Category]
+      summary: Update a menu category
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+        - $ref: '#/components/parameters/CategoryId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMenuCategoryRequest'
+      responses:
+        '200':
+          description: Category updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuCategoryResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Category not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: deleteMenuCategory
+      tags: [Menu Category]
+      summary: Delete a menu category
+      description: |
+        Deletes a category. All menu items under this category will be
+        moved to uncategorized or must be reassigned first.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+        - $ref: '#/components/parameters/CategoryId'
+      responses:
+        '200':
+          description: Category deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: Category still has active menu items
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Category not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /merchants/{merchantId}/menu/categories/reorder:
+    patch:
+      operationId: reorderMenuCategories
+      tags: [Menu Category]
+      summary: Reorder menu categories
+      description: Updates `display_order` for a list of categories in one call.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [orders]
+              properties:
+                orders:
+                  type: array
+                  items:
+                    type: object
+                    required: [category_id, display_order]
+                    properties:
+                      category_id:
+                        type: string
+                        example: "64f1a2b3c4d5e6f7a8b9c0d1"
+                      display_order:
+                        type: integer
+                        minimum: 0
+                        example: 0
+      responses:
+        '200':
+          description: Categories reordered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuCategoryListResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─────────────────────────── Menu Item ───────────────────────────
+  /merchants/{merchantId}/menu/items:
+    get:
+      operationId: listMenuItems
+      tags: [Menu Item]
+      summary: List all menu items for a merchant
+      description: Returns all menu items, optionally filtered by category or availability.
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+        - name: category_id
+          in: query
+          schema:
+            type: string
+          description: Filter by category ObjectId
+        - name: is_available
+          in: query
+          schema:
+            type: boolean
+          description: Filter by availability
+      responses:
+        '200':
+          description: List of menu items
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuItemListResponse'
+        '404':
+          description: Merchant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      operationId: createMenuItem
+      tags: [Menu Item]
+      summary: Create a new menu item
+      description: |
+        Creates a new menu item under the given merchant and category.
+        Triggers `Menu_Updated` Kafka event so Search Service re-indexes.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateMenuItemRequest'
+      responses:
+        '201':
+          description: Menu item created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuItemResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Category not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /merchants/{merchantId}/menu/items/{itemId}:
+    get:
+      operationId: getMenuItem
+      tags: [Menu Item]
+      summary: Get a single menu item by ID
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+        - $ref: '#/components/parameters/ItemId'
+      responses:
+        '200':
+          description: Menu item detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuItemResponse'
+        '404':
+          description: Menu item not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      operationId: updateMenuItem
+      tags: [Menu Item]
+      summary: Update a menu item
+      description: |
+        Full update of a menu item including variants and add-ons.
+        Triggers `Menu_Updated` Kafka event.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+        - $ref: '#/components/parameters/ItemId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMenuItemRequest'
+      responses:
+        '200':
+          description: Menu item updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuItemResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Menu item not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    delete:
+      operationId: deleteMenuItem
+      tags: [Menu Item]
+      summary: Delete a menu item
+      description: Soft-deletes by setting `is_available = false` and removing from index.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+        - $ref: '#/components/parameters/ItemId'
+      responses:
+        '200':
+          description: Menu item deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Menu item not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /merchants/{merchantId}/menu/items/{itemId}/availability:
+    patch:
+      operationId: toggleMenuItemAvailability
+      tags: [Menu Item]
+      summary: Toggle menu item availability
+      description: |
+        Quick toggle for merchant to mark item as available/unavailable
+        without a full update. Common use case: item sold out.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+        - $ref: '#/components/parameters/ItemId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [is_available]
+              properties:
+                is_available:
+                  type: boolean
+                  example: false
+                stock_count:
+                  type: integer
+                  nullable: true
+                  description: Set to null for unlimited stock
+                  example: 10
+      responses:
+        '200':
+          description: Availability updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuItemResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Menu item not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Internal ───────────────────────────
+  /internal/merchants/{merchantId}:
+    get:
+      operationId: internalGetMerchant
+      tags: [Internal]
+      summary: Get merchant data for internal service calls
+      description: |
+        Called by Food Order Service to validate merchant status and
+        get basic info when creating an order. Not exposed via API Gateway.
+      parameters:
+        - $ref: '#/components/parameters/MerchantId'
+      responses:
+        '200':
+          description: Merchant internal data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MerchantInternalResponse'
+        '404':
+          description: Merchant not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/menu-items/batch:
+    post:
+      operationId: internalGetMenuItemsBatch
+      tags: [Internal]
+      summary: Get multiple menu items by IDs (for order validation)
+      description: |
+        Called by Food Order Service to validate items and get current prices
+        at order creation time. Returns item snapshots.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [item_ids]
+              properties:
+                item_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: List of menu item ObjectIds
+                  example: ["64f1a2b3c4d5e6f7a8b9c0d1"]
+      responses:
+        '200':
+          description: List of menu items with current price and availability
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MenuItemListResponse'
+
+  # ─────────────────────────── Health ───────────────────────────
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: clay-merchant-service
+                  timestamp:
+                    type: string
+                    format: date-time
+
+# ═══════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    MerchantId:
+      name: merchantId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Merchant UUID
+    CategoryId:
+      name: categoryId
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Menu category ObjectId (MongoDB)
+    ItemId:
+      name: itemId
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Menu item ObjectId (MongoDB)
+
+  schemas:
+    # ── Merchant Schemas ──────────────────────────────────────────
+    RegisterMerchantRequest:
+      type: object
+      required: [name, address, lat, lng, category]
+      properties:
+        name:
+          type: string
+          maxLength: 100
+          example: "Warung Nasi Padang Maju"
+        address:
+          type: string
+          example: "Jl. Sudirman No.12, Bandung"
+        lat:
+          type: number
+          format: double
+          example: -6.914744
+        lng:
+          type: number
+          format: double
+          example: 107.609810
+        category:
+          type: string
+          maxLength: 50
+          example: "Indonesian Food"
+        description:
+          type: string
+          example: "Nasi Padang otentik sejak 1990"
+        phone:
+          type: string
+          example: "+6281234567890"
+        logo_url:
+          type: string
+          format: uri
+
+    UpdateMerchantRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        address:
+          type: string
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        category:
+          type: string
+        description:
+          type: string
+        phone:
+          type: string
+        logo_url:
+          type: string
+          format: uri
+
+    MerchantResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/Merchant'
+
+    MerchantPublicResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          allOf:
+            - $ref: '#/components/schemas/Merchant'
+            - type: object
+              properties:
+                operating_hours:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/OperatingHour'
+                is_open_now:
+                  type: boolean
+                  description: Computed field — is merchant open at request time
+
+    MerchantInternalResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            status:
+              type: string
+              enum: [active, closed, suspended, pending_review]
+            lat:
+              type: number
+            lng:
+              type: number
+            is_open_now:
+              type: boolean
+
+    Merchant:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        owner_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+          example: "warung-nasi-padang-maju"
+        address:
+          type: string
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        category:
+          type: string
+        description:
+          type: string
+        phone:
+          type: string
+        logo_url:
+          type: string
+        rating_avg:
+          type: number
+          format: double
+          example: 4.7
+        status:
+          type: string
+          enum: [active, closed, suspended, pending_review]
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Operating Hours Schemas ───────────────────────────────────
+    OperatingHour:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        day_of_week:
+          type: integer
+          minimum: 0
+          maximum: 6
+          description: 0=Sunday, 1=Monday, ..., 6=Saturday
+          example: 1
+        open_time:
+          type: string
+          format: time
+          example: "09:00"
+          nullable: true
+        close_time:
+          type: string
+          format: time
+          example: "22:00"
+          nullable: true
+        is_closed:
+          type: boolean
+          example: false
+
+    UpsertOperatingHoursRequest:
+      type: object
+      required: [hours]
+      properties:
+        hours:
+          type: array
+          minItems: 7
+          maxItems: 7
+          items:
+            type: object
+            required: [day_of_week, is_closed]
+            properties:
+              day_of_week:
+                type: integer
+                minimum: 0
+                maximum: 6
+              open_time:
+                type: string
+                format: time
+                example: "09:00"
+              close_time:
+                type: string
+                format: time
+                example: "22:00"
+              is_closed:
+                type: boolean
+
+    OperatingHoursListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/OperatingHour'
+
+    # ── Bank Account Schemas ──────────────────────────────────────
+    AddBankAccountRequest:
+      type: object
+      required: [bank_name, account_number, account_holder]
+      properties:
+        bank_name:
+          type: string
+          example: "BCA"
+        account_number:
+          type: string
+          example: "1234567890"
+        account_holder:
+          type: string
+          example: "Budi Santoso"
+
+    BankAccountResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/BankAccount'
+
+    BankAccountListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/BankAccount'
+
+    BankAccount:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        bank_name:
+          type: string
+        account_number:
+          type: string
+        account_holder:
+          type: string
+        is_primary:
+          type: boolean
+        is_verified:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Menu Category Schemas ─────────────────────────────────────
+    CreateMenuCategoryRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          maxLength: 100
+          example: "Makanan Berat"
+        display_order:
+          type: integer
+          minimum: 0
+          default: 0
+
+    UpdateMenuCategoryRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 100
+        display_order:
+          type: integer
+          minimum: 0
+        is_active:
+          type: boolean
+
+    MenuCategoryResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/MenuCategory'
+
+    MenuCategoryListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/MenuCategory'
+
+    MenuCategory:
+      type: object
+      properties:
+        id:
+          type: string
+          description: MongoDB ObjectId
+          example: "64f1a2b3c4d5e6f7a8b9c0d1"
+        merchant_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        display_order:
+          type: integer
+        is_active:
+          type: boolean
+
+    # ── Menu Item Schemas ─────────────────────────────────────────
+    MenuItemVariantOption:
+      type: object
+      required: [label, price_delta]
+      properties:
+        label:
+          type: string
+          example: "Pedas"
+        price_delta:
+          type: number
+          description: Additional price. 0 means no extra charge.
+          example: 0
+
+    MenuItemVariant:
+      type: object
+      required: [name, options]
+      properties:
+        name:
+          type: string
+          description: Variant group name
+          example: "Tingkat Kepedasan"
+        options:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/MenuItemVariantOption'
+
+    MenuItemAddonOption:
+      type: object
+      required: [label, price]
+      properties:
+        label:
+          type: string
+          example: "Telur Dadar"
+        price:
+          type: number
+          example: 3000
+        max_qty:
+          type: integer
+          minimum: 1
+          default: 1
+          description: Maximum quantity of this add-on per order item
+
+    MenuItemAddon:
+      type: object
+      required: [name, options]
+      properties:
+        name:
+          type: string
+          description: Add-on group name
+          example: "Tambahan Lauk"
+        options:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/MenuItemAddonOption'
+
+    CreateMenuItemRequest:
+      type: object
+      required: [category_id, name, base_price]
+      properties:
+        category_id:
+          type: string
+          description: MongoDB ObjectId of parent category
+          example: "64f1a2b3c4d5e6f7a8b9c0d1"
+        name:
+          type: string
+          maxLength: 100
+          example: "Nasi Padang Komplit"
+        description:
+          type: string
+          example: "Nasi dengan lauk pilihan, sayur, dan sambal"
+        base_price:
+          type: number
+          minimum: 0
+          example: 25000
+        images:
+          type: array
+          items:
+            type: string
+            format: uri
+          maxItems: 5
+        tags:
+          type: array
+          items:
+            type: string
+          example: ["halal", "spicy", "rice"]
+        variants:
+          type: array
+          items:
+            $ref: '#/components/schemas/MenuItemVariant'
+        addons:
+          type: array
+          items:
+            $ref: '#/components/schemas/MenuItemAddon'
+        is_available:
+          type: boolean
+          default: true
+        stock_count:
+          type: integer
+          nullable: true
+          description: null means unlimited
+          example: null
+        prep_time_min:
+          type: integer
+          description: Estimated preparation time in minutes
+          example: 15
+
+    UpdateMenuItemRequest:
+      type: object
+      properties:
+        category_id:
+          type: string
+        name:
+          type: string
+          maxLength: 100
+        description:
+          type: string
+        base_price:
+          type: number
+          minimum: 0
+        images:
+          type: array
+          items:
+            type: string
+            format: uri
+        tags:
+          type: array
+          items:
+            type: string
+        variants:
+          type: array
+          items:
+            $ref: '#/components/schemas/MenuItemVariant'
+        addons:
+          type: array
+          items:
+            $ref: '#/components/schemas/MenuItemAddon'
+        is_available:
+          type: boolean
+        stock_count:
+          type: integer
+          nullable: true
+        prep_time_min:
+          type: integer
+
+    MenuItemResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/MenuItem'
+
+    MenuItemListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/MenuItem'
+
+    MenuItem:
+      type: object
+      properties:
+        id:
+          type: string
+          description: MongoDB ObjectId
+          example: "64f1a2b3c4d5e6f7a8b9c0d2"
+        merchant_id:
+          type: string
+          format: uuid
+        category_id:
+          type: string
+          description: MongoDB ObjectId
+        name:
+          type: string
+        description:
+          type: string
+        base_price:
+          type: number
+        images:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+        variants:
+          type: array
+          items:
+            $ref: '#/components/schemas/MenuItemVariant'
+        addons:
+          type: array
+          items:
+            $ref: '#/components/schemas/MenuItemAddon'
+        is_available:
+          type: boolean
+        stock_count:
+          type: integer
+          nullable: true
+        prep_time_min:
+          type: integer
+
+    # ── Common Schemas ────────────────────────────────────────────
+    MessageResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: MERCHANT_NOT_FOUND
+            message:
+              type: string
+              example: Merchant with the given ID was not found
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'
+    RateLimited:
+      description: Too many requests
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'

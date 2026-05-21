@@ -1,0 +1,879 @@
+openapi: 3.0.3
+info:
+  title: Clay Chat Service API
+  description: |
+    Real-time in-order chat between users and drivers during active trips.
+
+    **Database:**
+    - MongoDB — chat rooms and messages (flexible document model for varied message types)
+
+    **Real-time:**
+    - WebSocket at `wss://api.clay.id/chat/ws` for live message delivery
+    - REST endpoints below are for history retrieval, room management, and
+      sending messages when WebSocket is unavailable (fallback)
+
+    **Kafka Events Consumed:**
+    - `Order_Created` — auto-creates a chat room with status `active`
+    - `Trip_Completed` — sets chat room status to `closed`, no new messages allowed
+
+    **Kafka Events Produced:**
+    - `Chat_Message_Sent` — consumed by Notification Service for push notif
+      when the recipient app is in background
+
+    **WebSocket Protocol:**
+    ```
+    Connect:  wss://api.clay.id/chat/ws?token={jwt_access_token}
+    Send:     { "type": "message", "room_id": "...", "content": "...", "msg_type": "text" }
+    Receive:  { "type": "new_message", "data": { ...Message object } }
+    Typing:   { "type": "typing", "room_id": "..." }
+    Read:     { "type": "read", "room_id": "...", "message_id": "..." }
+    ```
+  version: 1.0.0
+  contact:
+    name: Clay Team
+
+servers:
+  - url: http://localhost:3010/api/v1
+    description: Local development
+  - url: https://api.clay.id/chat/v1
+    description: Production (via API Gateway)
+
+tags:
+  - name: Room
+    description: Chat room lifecycle and retrieval
+  - name: Message
+    description: Sending and retrieving messages
+  - name: Read Receipt
+    description: Message read status tracking
+  - name: Internal
+    description: Internal endpoints (called by other services, not exposed to public)
+
+paths:
+  # ─────────────────────────── Room ───────────────────────────
+  /rooms:
+    get:
+      operationId: listMyRooms
+      tags: [Room]
+      summary: List chat rooms for the authenticated user
+      description: |
+        Returns all chat rooms where the authenticated user is a participant
+        (as `user_id` or `driver_id`). Sorted by most recently active first.
+        Includes the last message preview and unread count for each room.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          description: Filter by room status
+          schema:
+            type: string
+            enum: [active, closed]
+          example: active
+        - name: order_type
+          in: query
+          description: Filter by order type
+          schema:
+            type: string
+            enum: [ride, food, delivery]
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Paginated list of chat rooms
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /rooms/by-order/{orderId}:
+    get:
+      operationId: getRoomByOrderId
+      tags: [Room]
+      summary: Get chat room by order ID
+      description: |
+        Looks up the chat room associated with a specific order.
+        This is the primary way the user/driver app finds the correct room —
+        when a user taps "Chat" on the active order screen, the app calls this
+        endpoint with the order ID.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/OrderIdPath'
+      responses:
+        '200':
+          description: Chat room for this order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomDetailResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Authenticated user is not a participant of this room
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No chat room found for this order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /rooms/{roomId}:
+    get:
+      operationId: getRoomById
+      tags: [Room]
+      summary: Get chat room details by room ID
+      description: |
+        Returns full room metadata including participants, status,
+        order info, and unread count for the authenticated user.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RoomIdPath'
+      responses:
+        '200':
+          description: Chat room details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomDetailResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Authenticated user is not a participant of this room
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Chat room not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Message ───────────────────────────
+  /rooms/{roomId}/messages:
+    get:
+      operationId: listMessages
+      tags: [Message]
+      summary: Get message history for a chat room
+      description: |
+        Returns messages in reverse chronological order (newest first).
+        Use cursor-based pagination for efficient infinite scroll.
+        Each page returns up to `limit` messages. Pass `before` with the
+        oldest message ID from the current page to load older messages.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RoomIdPath'
+        - name: before
+          in: query
+          description: |
+            Cursor — return messages older than this message ID.
+            Omit to get the latest messages.
+          schema:
+            type: string
+          example: "64f1a2b3c4d5e6f7a8b9c0d1"
+        - name: limit
+          in: query
+          description: Number of messages to return per page
+          schema:
+            type: integer
+            default: 30
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Message list (newest first within page)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Authenticated user is not a participant of this room
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Chat room not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      operationId: sendMessage
+      tags: [Message]
+      summary: Send a message (REST fallback)
+      description: |
+        Sends a message to the chat room via REST. This is a **fallback** for when
+        the WebSocket connection is unavailable. Prefer WebSocket for real-time delivery.
+
+        **Behavior:**
+        - Validates that the room is `active` (returns 403 if closed)
+        - Validates sender is a participant
+        - Persists message to MongoDB
+        - Publishes `Chat_Message_Sent` Kafka event → Notification Service
+        - Broadcasts to connected WebSocket clients in the room
+
+        **Message types:**
+        - `text` — plain text message
+        - `image` — image URL (uploaded separately via `/rooms/{roomId}/messages/upload`)
+        - `location` — lat/lng coordinate share
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RoomIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '201':
+          description: Message sent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Room is closed or user is not a participant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Chat room not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /rooms/{roomId}/messages/upload:
+    post:
+      operationId: uploadMessageImage
+      tags: [Message]
+      summary: Upload an image to send in chat
+      description: |
+        Uploads an image file and returns a URL. The client then sends a message
+        with `type: "image"` and the returned URL as `content`.
+        Max file size: 5MB. Accepted formats: JPEG, PNG, WebP.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RoomIdPath'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: Image file (JPEG, PNG, WebP). Max 5MB.
+      responses:
+        '200':
+          description: Image uploaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    properties:
+                      image_url:
+                        type: string
+                        format: uri
+                        description: CDN URL of the uploaded image
+                        example: "https://cdn.clay.id/chat/img_a1b2c3d4.webp"
+                      thumbnail_url:
+                        type: string
+                        format: uri
+                        description: Compressed thumbnail for preview
+                        example: "https://cdn.clay.id/chat/thumb_a1b2c3d4.webp"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Room is closed or user is not a participant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: File too large (max 5MB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Read Receipt ───────────────────────────
+  /rooms/{roomId}/read:
+    post:
+      operationId: markMessagesAsRead
+      tags: [Read Receipt]
+      summary: Mark messages as read up to a given message
+      description: |
+        Marks all messages in the room as `is_read = true` up to and including
+        the specified `message_id`. This is an idempotent operation.
+        Also broadcasts a `read_receipt` event to the other participant via WebSocket.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RoomIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message_id]
+              properties:
+                message_id:
+                  type: string
+                  description: Read up to and including this message
+                  example: "64f1a2b3c4d5e6f7a8b9c0d9"
+      responses:
+        '200':
+          description: Messages marked as read
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    properties:
+                      marked_count:
+                        type: integer
+                        description: Number of messages marked as read
+                        example: 5
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: User is not a participant of this room
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /rooms/{roomId}/unread-count:
+    get:
+      operationId: getUnreadCount
+      tags: [Read Receipt]
+      summary: Get unread message count for a room
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/RoomIdPath'
+      responses:
+        '200':
+          description: Unread count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: success
+                  data:
+                    type: object
+                    properties:
+                      room_id:
+                        type: string
+                        example: "64f1a2b3c4d5e6f7a8b9c0d1"
+                      unread_count:
+                        type: integer
+                        example: 3
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ─────────────────────────── Internal ───────────────────────────
+  /internal/rooms:
+    post:
+      operationId: internalCreateRoom
+      tags: [Internal]
+      summary: Create a chat room (triggered by Order_Created event)
+      description: |
+        Called internally when an `Order_Created` Kafka event is consumed.
+        Creates a new chat room linking the user and driver for the order.
+        This endpoint is **not exposed** via API Gateway.
+
+        **Idempotent:** If a room already exists for the given `order_id`,
+        returns the existing room instead of creating a duplicate.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalCreateRoomRequest'
+      responses:
+        '201':
+          description: Chat room created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomDetailResponse'
+        '200':
+          description: Chat room already exists for this order (idempotent)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomDetailResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+  /internal/rooms/{roomId}/close:
+    post:
+      operationId: internalCloseRoom
+      tags: [Internal]
+      summary: Close a chat room (triggered by Trip_Completed event)
+      description: |
+        Called internally when a `Trip_Completed` Kafka event is consumed.
+        Sets the room status to `closed` and records `closed_at` timestamp.
+        No new messages can be sent after this. Existing messages remain readable.
+
+        **Idempotent:** If room is already closed, returns 200 with current state.
+      parameters:
+        - $ref: '#/components/parameters/RoomIdPath'
+      responses:
+        '200':
+          description: Room closed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomDetailResponse'
+        '404':
+          description: Chat room not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /internal/rooms/by-order/{orderId}/assign-driver:
+    patch:
+      operationId: internalAssignDriver
+      tags: [Internal]
+      summary: Assign driver to chat room (triggered by Driver_Found event)
+      description: |
+        When a driver accepts an order, the room initially created with
+        `driver_id = null` needs the driver assigned. Called internally
+        when `Driver_Found` Kafka event is consumed.
+      parameters:
+        - $ref: '#/components/parameters/OrderIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [driver_id]
+              properties:
+                driver_id:
+                  type: string
+                  format: uuid
+                  example: "drv_m1n2o3-..."
+      responses:
+        '200':
+          description: Driver assigned to room
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RoomDetailResponse'
+        '404':
+          description: No room found for this order
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ─────────────────────────── Health ───────────────────────────
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  service:
+                    type: string
+                    example: clay-chat-service
+                  websocket_connections:
+                    type: integer
+                    description: Current number of active WebSocket connections
+                    example: 342
+                  timestamp:
+                    type: string
+                    format: date-time
+
+# ═══════════════════════════════════════════════════════════════
+# COMPONENTS
+# ═══════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token (15 min TTL)
+
+  parameters:
+    RoomIdPath:
+      name: roomId
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Chat room ObjectId (MongoDB)
+      example: "64f1a2b3c4d5e6f7a8b9c0d1"
+    OrderIdPath:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Order UUID
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+      description: Page number (1-indexed)
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 50
+      description: Items per page
+
+  schemas:
+    # ── Request Schemas ───────────────────────────────────────────
+    SendMessageRequest:
+      type: object
+      required: [content, type]
+      properties:
+        content:
+          type: string
+          description: |
+            Message content. Interpretation depends on `type`:
+            - `text`: plain text string
+            - `image`: image URL (from `/messages/upload`)
+            - `location`: JSON string `{"lat": -6.914, "lng": 107.609, "label": "..."}`
+          example: "Saya sudah di depan pagar ya, Pak"
+        type:
+          type: string
+          enum: [text, image, location]
+          description: Type of message content
+          example: text
+        client_id:
+          type: string
+          description: |
+            Client-generated unique ID for deduplication. If a message
+            with the same `client_id` already exists in this room,
+            the server returns the existing message instead of creating a duplicate.
+          example: "msg_local_1714055400123"
+
+    InternalCreateRoomRequest:
+      type: object
+      required: [order_id, order_type, user_id]
+      properties:
+        order_id:
+          type: string
+          format: uuid
+          description: The order this chat room belongs to
+          example: "ord_x9y8z7-..."
+        order_type:
+          type: string
+          enum: [ride, food, delivery]
+          description: Type of the order
+          example: ride
+        user_id:
+          type: string
+          format: uuid
+          description: Customer user ID
+          example: "usr_abc123-..."
+        driver_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Driver ID. Can be null if driver hasn't been assigned yet
+            (room created on Order_Created before Driver_Found).
+          example: null
+
+    # ── Entity Schemas ────────────────────────────────────────────
+    ChatRoom:
+      type: object
+      properties:
+        id:
+          type: string
+          description: MongoDB ObjectId
+          example: "64f1a2b3c4d5e6f7a8b9c0d1"
+        order_id:
+          type: string
+          format: uuid
+          example: "ord_x9y8z7-..."
+        order_type:
+          type: string
+          enum: [ride, food, delivery]
+          example: ride
+        user_id:
+          type: string
+          format: uuid
+          example: "usr_abc123-..."
+        driver_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Null if driver not yet assigned
+          example: "drv_m1n2o3-..."
+        status:
+          type: string
+          enum: [active, closed]
+          example: active
+        created_at:
+          type: string
+          format: date-time
+          example: "2025-04-01T10:30:00Z"
+        closed_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null if room is still active
+          example: null
+
+    ChatRoomWithPreview:
+      description: Chat room with last message preview and unread count
+      allOf:
+        - $ref: '#/components/schemas/ChatRoom'
+        - type: object
+          properties:
+            last_message:
+              $ref: '#/components/schemas/Message'
+            unread_count:
+              type: integer
+              description: Number of unread messages for the authenticated user
+              example: 2
+
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+          description: MongoDB ObjectId
+          example: "64f1a2b3c4d5e6f7a8b9c0d9"
+        room_id:
+          type: string
+          description: Parent chat room ObjectId
+          example: "64f1a2b3c4d5e6f7a8b9c0d1"
+        sender_id:
+          type: string
+          format: uuid
+          description: UUID of the user or driver who sent this message
+          example: "usr_abc123-..."
+        sender_role:
+          type: string
+          enum: [user, driver]
+          description: Role of the sender in this order context
+          example: user
+        content:
+          type: string
+          description: |
+            Message content. For `image` type this is a CDN URL.
+            For `location` type this is a JSON object string.
+          example: "Saya sudah di depan pagar ya, Pak"
+        type:
+          type: string
+          enum: [text, image, location]
+          example: text
+        is_read:
+          type: boolean
+          description: Whether the recipient has read this message
+          example: false
+        client_id:
+          type: string
+          nullable: true
+          description: Client-generated deduplication ID
+          example: "msg_local_1714055400123"
+        created_at:
+          type: string
+          format: date-time
+          example: "2025-04-01T10:31:45Z"
+
+    # ── Response Schemas ──────────────────────────────────────────
+    RoomDetailResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/ChatRoomWithPreview'
+
+    RoomListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatRoomWithPreview'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    MessageResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          $ref: '#/components/schemas/Message'
+
+    MessageListResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        meta:
+          type: object
+          properties:
+            has_more:
+              type: boolean
+              description: Whether there are older messages to load
+              example: true
+            oldest_id:
+              type: string
+              description: |
+                ID of the oldest message in this page.
+                Pass as `before` param to load next page.
+              example: "64f1a2b3c4d5e6f7a8b9c0d0"
+            count:
+              type: integer
+              description: Number of messages in this page
+              example: 30
+
+    # ── Common Schemas ────────────────────────────────────────────
+    PaginationMeta:
+      type: object
+      properties:
+        page:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 20
+        total:
+          type: integer
+          example: 5
+        total_pages:
+          type: integer
+          example: 1
+
+    MessageResponseGeneric:
+      type: object
+      properties:
+        status:
+          type: string
+          example: success
+        message:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: ROOM_NOT_FOUND
+            message:
+              type: string
+              example: Chat room with the given ID was not found
+
+    ValidationErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: error
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+            details:
+              type: array
+              items:
+                type: object
+                properties:
+                  field:
+                    type: string
+                  message:
+                    type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ValidationError:
+      description: Request body validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'
