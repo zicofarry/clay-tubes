@@ -13,7 +13,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	service "github.com/zicofarry/clay-app/backend/services/history-service/internal/service"
+	service "github.com/zicofarry/clay-tubes/backend/services/history-service/internal/service"
 	gomock "go.uber.org/mock/gomock"
 )
 

@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/zicofarry/clay-app/backend/services/user-service/internal/models"
-	"github.com/zicofarry/clay-app/backend/services/user-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/user-service/internal/models"
+	"github.com/zicofarry/clay-tubes/backend/services/user-service/internal/repository"
 )
 
 //go:generate mockgen -source=user_service.go -destination=../../mocks/mock_user_service.go -package=mocks

@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/zicofarry/clay-app/backend/services/gateway/config"
+	"github.com/zicofarry/clay-tubes/backend/services/gateway/config"
 )
 
 const testSecret = "test-secret-key-for-unit-tests-only"

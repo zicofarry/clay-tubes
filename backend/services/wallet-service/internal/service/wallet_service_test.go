@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/zicofarry/clay-app/backend/services/wallet-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/wallet-service/mocks"
+	"github.com/zicofarry/clay-tubes/backend/services/wallet-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/wallet-service/mocks"
 	"go.uber.org/mock/gomock"
 )
 

@@ -13,7 +13,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	repository "github.com/zicofarry/clay-app/backend/services/audit-log-service/internal/repository"
+	repository "github.com/zicofarry/clay-tubes/backend/services/audit-log-service/internal/repository"
 	bson "go.mongodb.org/mongo-driver/bson"
 	primitive "go.mongodb.org/mongo-driver/bson/primitive"
 	gomock "go.uber.org/mock/gomock"

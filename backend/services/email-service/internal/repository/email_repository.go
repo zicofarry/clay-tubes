@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/zicofarry/clay-app/backend/services/email-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/email-service/internal/model"
 )
 
 var (

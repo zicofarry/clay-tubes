@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/zicofarry/clay-app/backend/services/audit-log-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/audit-log-service/mocks/repomock"
+	"github.com/zicofarry/clay-tubes/backend/services/audit-log-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/audit-log-service/mocks/repomock"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/mock/gomock"
 )

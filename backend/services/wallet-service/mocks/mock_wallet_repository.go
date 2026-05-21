@@ -6,7 +6,7 @@ import (
 	reflect "reflect"
 
 	uuid "github.com/google/uuid"
-	repository "github.com/zicofarry/clay-app/backend/services/wallet-service/internal/repository"
+	repository "github.com/zicofarry/clay-tubes/backend/services/wallet-service/internal/repository"
 	gomock "go.uber.org/mock/gomock"
 )
 

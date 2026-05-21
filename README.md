@@ -5,7 +5,7 @@ Monorepo for Clay — a microservices-based on-demand service platform (Gojek-st
 ## Structure
 
 ```
-clay-app/
+clay-tubes/
 ├── backend/
 │   ├── go.work              # Go workspace
 │   ├── services/            # 24 microservices
@@ -54,8 +54,8 @@ clay-app/
 
 ```bash
 # Clone
-git clone <repo-url> clay-app
-cd clay-app/backend
+git clone <repo-url> clay-tubes
+cd clay-tubes/backend
 
 # Sync Go workspace
 go work sync

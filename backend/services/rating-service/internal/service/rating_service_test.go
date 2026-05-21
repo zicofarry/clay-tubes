@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/zicofarry/clay-app/backend/services/rating-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/rating-service/mocks/repomock"
+	"github.com/zicofarry/clay-tubes/backend/services/rating-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/rating-service/mocks/repomock"
 	"go.uber.org/mock/gomock"
 )
 

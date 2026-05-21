@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/delivery-order-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/delivery-order-service/internal/repository"
 )
 
 // ── Service Error ────────────────────────────────────────────────────────────

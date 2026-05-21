@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zicofarry/clay-app/backend/services/ride-order-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/services/ride-order-service/mocks"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/services/ride-order-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/services/ride-order-service/mocks"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
 	"go.uber.org/mock/gomock"
 )
 

@@ -3,9 +3,9 @@ package handler
 import (
 	"net/http"
 
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/validator"
-	"github.com/zicofarry/clay-app/backend/services/tracking-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/validator"
+	"github.com/zicofarry/clay-tubes/backend/services/tracking-service/internal/service"
 )
 
 type TrackingHandler struct {

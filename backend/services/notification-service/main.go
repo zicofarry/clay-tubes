@@ -5,12 +5,12 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/zicofarry/clay-app/backend/services/notification-service/internal/handler"
-	"github.com/zicofarry/clay-app/backend/services/notification-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/notification-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/database"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/middleware"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/services/notification-service/internal/handler"
+	"github.com/zicofarry/clay-tubes/backend/services/notification-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/notification-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/database"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
 )
 
 func main() {

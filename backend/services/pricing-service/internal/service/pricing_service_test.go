@@ -9,8 +9,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/zicofarry/clay-app/backend/services/pricing-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/pricing-service/mocks/repomock"
+	"github.com/zicofarry/clay-tubes/backend/services/pricing-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/pricing-service/mocks/repomock"
 	"go.uber.org/mock/gomock"
 )
 

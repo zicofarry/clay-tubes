@@ -1,8 +1,8 @@
-module github.com/zicofarry/clay-app/backend/services/food-order-service
+module github.com/zicofarry/clay-tubes/backend/services/food-order-service
 
 go 1.23.0
 
-replace github.com/zicofarry/clay-app/backend/pkg => ../../pkg
+replace github.com/zicofarry/clay-tubes/backend/pkg => ../../pkg
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.5.2
@@ -10,7 +10,7 @@ require (
 	github.com/lib/pq v1.12.3
 	github.com/redis/go-redis/v9 v9.18.0
 	github.com/stretchr/testify v1.11.1
-	github.com/zicofarry/clay-app/backend/pkg v0.0.0-00010101000000-000000000000
+	github.com/zicofarry/clay-tubes/backend/pkg v0.0.0-00010101000000-000000000000
 	go.mongodb.org/mongo-driver v1.17.9
 	go.uber.org/mock v0.6.0
 )

@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/zicofarry/clay-app/backend/services/payment-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/validator"
+	"github.com/zicofarry/clay-tubes/backend/services/payment-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/validator"
 )
 
 // PaymentHandler holds references to the payment service layer.

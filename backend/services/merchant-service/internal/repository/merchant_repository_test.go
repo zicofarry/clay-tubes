@@ -9,7 +9,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
-	"github.com/zicofarry/clay-app/backend/services/merchant-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/model"
 )
 
 // helper: creates sqlmock and merchant repo

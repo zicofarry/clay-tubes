@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/zicofarry/clay-app/backend/services/chat-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/chat-service/mocks/repomock"
+	"github.com/zicofarry/clay-tubes/backend/services/chat-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/chat-service/mocks/repomock"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.uber.org/mock/gomock"
 )

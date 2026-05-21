@@ -14,7 +14,7 @@ import (
 	reflect "reflect"
 
 	uuid "github.com/google/uuid"
-	models "github.com/zicofarry/clay-app/backend/services/user-service/internal/models"
+	models "github.com/zicofarry/clay-tubes/backend/services/user-service/internal/models"
 	gomock "go.uber.org/mock/gomock"
 )
 

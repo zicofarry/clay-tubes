@@ -9,8 +9,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/zicofarry/clay-app/backend/services/matching-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/matching-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/services/matching-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/matching-service/internal/service"
 )
 
 // goOnline is a small helper to bring a driver online at a location.

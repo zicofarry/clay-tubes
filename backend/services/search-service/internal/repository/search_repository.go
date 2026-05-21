@@ -9,7 +9,7 @@ import (
 
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/elastic/go-elasticsearch/v8/esapi"
-	"github.com/zicofarry/clay-app/backend/services/search-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/search-service/internal/model"
 )
 
 const (

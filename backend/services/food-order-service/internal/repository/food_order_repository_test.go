@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/zicofarry/clay-app/backend/services/food-order-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/model"
 )
 
 func TestCreate_Success(t *testing.T) {

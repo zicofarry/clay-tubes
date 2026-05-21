@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/tracking-service/internal/cache"
-	"github.com/zicofarry/clay-app/backend/services/tracking-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/tracking-service/internal/cache"
+	"github.com/zicofarry/clay-tubes/backend/services/tracking-service/internal/repository"
 )
 
 // ServiceError maps to HTTP status codes

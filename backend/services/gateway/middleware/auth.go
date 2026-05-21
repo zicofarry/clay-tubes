@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/zicofarry/clay-app/backend/services/gateway/config"
+	"github.com/zicofarry/clay-tubes/backend/services/gateway/config"
 )
 
 // ClayContext holds the claims extracted from a verified JWT.

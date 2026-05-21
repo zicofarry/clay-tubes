@@ -8,9 +8,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/zicofarry/clay-app/backend/services/geo-service/internal/cache"
-	"github.com/zicofarry/clay-app/backend/services/geo-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/geo-service/mocks/repomock"
+	"github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/cache"
+	"github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/geo-service/mocks/repomock"
 	"go.uber.org/mock/gomock"
 )
 

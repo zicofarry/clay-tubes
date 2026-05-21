@@ -8,7 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
-	"github.com/zicofarry/clay-app/backend/services/food-order-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/model"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/food-order-service/internal/model"
-	"github.com/zicofarry/clay-app/backend/services/food-order-service/mocks/repomock"
-	sharedKafka "github.com/zicofarry/clay-app/backend/pkg/pkg/kafka"
+	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/mocks/repomock"
+	sharedKafka "github.com/zicofarry/clay-tubes/backend/pkg/pkg/kafka"
 	"go.uber.org/mock/gomock"
 )
 

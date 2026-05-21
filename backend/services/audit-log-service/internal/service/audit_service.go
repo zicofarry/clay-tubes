@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/zicofarry/clay-app/backend/services/audit-log-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/audit-log-service/internal/repository"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )

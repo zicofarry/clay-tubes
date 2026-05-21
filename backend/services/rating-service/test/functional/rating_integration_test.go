@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
-	"github.com/zicofarry/clay-app/backend/services/rating-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/rating-service/internal/repository"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )

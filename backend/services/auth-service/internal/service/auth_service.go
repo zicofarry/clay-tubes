@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/auth-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/auth-service/internal/repository"
 )
 
 // ── Service Error ────────────────────────────────────────────────────────────

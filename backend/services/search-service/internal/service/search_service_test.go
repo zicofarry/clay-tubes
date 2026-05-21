@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/zicofarry/clay-app/backend/services/search-service/mocks/repomock"
+	"github.com/zicofarry/clay-tubes/backend/services/search-service/mocks/repomock"
 	"go.uber.org/mock/gomock"
 )
 

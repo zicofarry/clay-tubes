@@ -10,7 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	_ "github.com/lib/pq"
-	"github.com/zicofarry/clay-app/backend/services/wallet-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/wallet-service/internal/repository"
 )
 
 func setupTestDB(t *testing.T) *sql.DB {

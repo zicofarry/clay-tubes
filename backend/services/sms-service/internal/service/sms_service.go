@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/zicofarry/clay-app/backend/services/sms-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/sms-service/internal/repository"
 )
 
 var (

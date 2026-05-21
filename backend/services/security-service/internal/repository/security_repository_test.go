@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/zicofarry/clay-app/backend/services/security-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/security-service/internal/repository"
 )
 
 func newMockRepo(t *testing.T) (*repository.SecurityRepository, sqlmock.Sqlmock) {

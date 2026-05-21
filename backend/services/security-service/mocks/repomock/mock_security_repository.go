@@ -10,7 +10,7 @@ import (
 	reflect "reflect"
 	time "time"
 
-	repository "github.com/zicofarry/clay-app/backend/services/security-service/internal/repository"
+	repository "github.com/zicofarry/clay-tubes/backend/services/security-service/internal/repository"
 	gomock "go.uber.org/mock/gomock"
 )
 

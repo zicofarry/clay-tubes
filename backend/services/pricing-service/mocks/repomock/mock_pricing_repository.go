@@ -5,7 +5,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	repository "github.com/zicofarry/clay-app/backend/services/pricing-service/internal/repository"
+	repository "github.com/zicofarry/clay-tubes/backend/services/pricing-service/internal/repository"
 	gomock "go.uber.org/mock/gomock"
 )
 

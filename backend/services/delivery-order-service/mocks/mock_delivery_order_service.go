@@ -9,7 +9,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	service "github.com/zicofarry/clay-app/backend/services/delivery-order-service/internal/service"
+	service "github.com/zicofarry/clay-tubes/backend/services/delivery-order-service/internal/service"
 	gomock "go.uber.org/mock/gomock"
 )
 

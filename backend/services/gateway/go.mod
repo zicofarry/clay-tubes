@@ -1,4 +1,4 @@
-module github.com/zicofarry/clay-app/backend/services/gateway
+module github.com/zicofarry/clay-tubes/backend/services/gateway
 
 go 1.23.0
 
@@ -17,4 +17,4 @@ require (
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
 
-replace github.com/zicofarry/clay-app/backend/pkg => ../../pkg
+replace github.com/zicofarry/clay-tubes/backend/pkg => ../../pkg

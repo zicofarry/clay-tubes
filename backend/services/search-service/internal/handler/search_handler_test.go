@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/zicofarry/clay-app/backend/services/search-service/mocks"
+	"github.com/zicofarry/clay-tubes/backend/services/search-service/mocks"
 	"go.uber.org/mock/gomock"
 )
 

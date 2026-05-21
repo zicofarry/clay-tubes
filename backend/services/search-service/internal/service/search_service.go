@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/zicofarry/clay-app/backend/services/search-service/internal/model"
-	"github.com/zicofarry/clay-app/backend/services/search-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/search-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/search-service/internal/repository"
 )
 
 type SearchServiceInterface interface {

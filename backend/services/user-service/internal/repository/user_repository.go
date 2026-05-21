@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
-	"github.com/zicofarry/clay-app/backend/services/user-service/internal/models"
+	"github.com/zicofarry/clay-tubes/backend/services/user-service/internal/models"
 )
 
 //go:generate mockgen -source=user_repository.go -destination=../../mocks/repomock/mock_user_repository.go -package=repomock

@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/email-service/internal/model"
-	"github.com/zicofarry/clay-app/backend/services/email-service/mocks"
+	"github.com/zicofarry/clay-tubes/backend/services/email-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/email-service/mocks"
 	"go.uber.org/mock/gomock"
 )
 

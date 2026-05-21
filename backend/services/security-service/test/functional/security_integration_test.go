@@ -21,7 +21,7 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
-	"github.com/zicofarry/clay-app/backend/services/security-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/security-service/internal/repository"
 )
 
 // dsn returns the test DSN, allowing CI override via TEST_DATABASE_URL.

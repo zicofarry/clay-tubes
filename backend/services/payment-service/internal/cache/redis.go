@@ -15,7 +15,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/idempotency"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/idempotency"
 )
 
 // ───── Redis Client Interface ────────────────────────────────────────────────

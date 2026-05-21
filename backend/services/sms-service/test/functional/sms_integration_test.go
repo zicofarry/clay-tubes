@@ -13,9 +13,9 @@ import (
 	"testing"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/zicofarry/clay-app/backend/services/sms-service/internal/handler"
-	"github.com/zicofarry/clay-app/backend/services/sms-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/sms-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/services/sms-service/internal/handler"
+	"github.com/zicofarry/clay-tubes/backend/services/sms-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/sms-service/internal/service"
 )
 
 func TestFunctional_SendOTP(t *testing.T) {

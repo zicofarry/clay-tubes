@@ -5,8 +5,8 @@ import (
 	context "context"
 	reflect "reflect"
 
-	cache "github.com/zicofarry/clay-app/backend/services/geo-service/internal/cache"
-	service "github.com/zicofarry/clay-app/backend/services/geo-service/internal/service"
+	cache "github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/cache"
+	service "github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/service"
 	gomock "go.uber.org/mock/gomock"
 )
 

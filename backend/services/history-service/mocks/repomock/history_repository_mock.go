@@ -15,7 +15,7 @@ import (
 	time "time"
 
 	uuid "github.com/google/uuid"
-	repository "github.com/zicofarry/clay-app/backend/services/history-service/internal/repository"
+	repository "github.com/zicofarry/clay-tubes/backend/services/history-service/internal/repository"
 	gomock "go.uber.org/mock/gomock"
 )
 

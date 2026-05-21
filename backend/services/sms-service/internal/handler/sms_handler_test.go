@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/sms-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/services/sms-service/mocks"
+	"github.com/zicofarry/clay-tubes/backend/services/sms-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/services/sms-service/mocks"
 	"go.uber.org/mock/gomock"
 )
 

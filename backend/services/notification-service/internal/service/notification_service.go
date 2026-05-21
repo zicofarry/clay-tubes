@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/zicofarry/clay-app/backend/services/notification-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/notification-service/internal/repository"
 )
 
 // ── Service Error ────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-module github.com/zicofarry/clay-app/backend/pkg
+module github.com/zicofarry/clay-tubes/backend/pkg
 
 go 1.23.0
 

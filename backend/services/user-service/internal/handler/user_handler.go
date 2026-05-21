@@ -6,9 +6,9 @@ import (
 	"net/http"
 
 	"github.com/google/uuid"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
-	"github.com/zicofarry/clay-app/backend/services/user-service/internal/models"
-	"github.com/zicofarry/clay-app/backend/services/user-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/services/user-service/internal/models"
+	"github.com/zicofarry/clay-tubes/backend/services/user-service/internal/service"
 )
 
 type UserHandler struct {

@@ -13,7 +13,7 @@ import (
 	context "context"
 	reflect "reflect"
 
-	model "github.com/zicofarry/clay-app/backend/services/email-service/internal/model"
+	model "github.com/zicofarry/clay-tubes/backend/services/email-service/internal/model"
 	gomock "go.uber.org/mock/gomock"
 )
 

@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/zicofarry/clay-app/backend/services/gateway/config"
-	"github.com/zicofarry/clay-app/backend/services/gateway/middleware"
-	"github.com/zicofarry/clay-app/backend/services/gateway/router"
+	"github.com/zicofarry/clay-tubes/backend/services/gateway/config"
+	"github.com/zicofarry/clay-tubes/backend/services/gateway/middleware"
+	"github.com/zicofarry/clay-tubes/backend/services/gateway/router"
 )
 
 func main() {

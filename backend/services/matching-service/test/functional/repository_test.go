@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/matching-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/matching-service/internal/repository"
 )
 
 const (

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/zicofarry/clay-app/backend/services/sms-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/sms-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/services/sms-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/sms-service/internal/service"
 )
 
 type SMSHandler struct {

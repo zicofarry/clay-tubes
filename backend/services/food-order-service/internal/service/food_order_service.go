@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/zicofarry/clay-app/backend/services/food-order-service/internal/model"
-	"github.com/zicofarry/clay-app/backend/services/food-order-service/internal/repository"
-	sharedKafka "github.com/zicofarry/clay-app/backend/pkg/pkg/kafka"
+	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/repository"
+	sharedKafka "github.com/zicofarry/clay-tubes/backend/pkg/pkg/kafka"
 )
 
 const (

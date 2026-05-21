@@ -11,10 +11,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zicofarry/clay-app/backend/services/merchant-service/internal/model"
-	"github.com/zicofarry/clay-app/backend/services/merchant-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/services/merchant-service/mocks"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/mocks"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
 	"go.uber.org/mock/gomock"
 )
 

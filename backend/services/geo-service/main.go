@@ -10,14 +10,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/geo-service/internal/broker"
-	geocache "github.com/zicofarry/clay-app/backend/services/geo-service/internal/cache"
-	"github.com/zicofarry/clay-app/backend/services/geo-service/internal/handler"
-	"github.com/zicofarry/clay-app/backend/services/geo-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/geo-service/internal/service"
-	sharedKafka "github.com/zicofarry/clay-app/backend/pkg/pkg/kafka"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/middleware"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/broker"
+	geocache "github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/cache"
+	"github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/handler"
+	"github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/service"
+	sharedKafka "github.com/zicofarry/clay-tubes/backend/pkg/pkg/kafka"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
 )
 
 func main() {

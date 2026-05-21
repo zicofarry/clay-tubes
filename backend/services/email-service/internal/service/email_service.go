@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/zicofarry/clay-app/backend/services/email-service/internal/model"
-	"github.com/zicofarry/clay-app/backend/services/email-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/email-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/email-service/internal/repository"
 )
 
 var (

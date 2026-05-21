@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"github.com/zicofarry/clay-app/backend/services/push-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/push-service/internal/repository"
 )
 
 // redisAddr returns the Redis address for functional tests.

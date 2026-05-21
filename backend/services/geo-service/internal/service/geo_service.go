@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/geo-service/internal/cache"
-	"github.com/zicofarry/clay-app/backend/services/geo-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/cache"
+	"github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/repository"
 )
 
 // ── Service Error ────────────────────────────────────────────────────────────

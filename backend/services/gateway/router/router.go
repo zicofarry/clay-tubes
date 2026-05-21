@@ -10,9 +10,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/zicofarry/clay-app/backend/services/gateway/config"
-	"github.com/zicofarry/clay-app/backend/services/gateway/middleware"
-	"github.com/zicofarry/clay-app/backend/services/gateway/proxy"
+	"github.com/zicofarry/clay-tubes/backend/services/gateway/config"
+	"github.com/zicofarry/clay-tubes/backend/services/gateway/middleware"
+	"github.com/zicofarry/clay-tubes/backend/services/gateway/proxy"
 )
 
 // Build constructs and returns the root http.Handler for the gateway.

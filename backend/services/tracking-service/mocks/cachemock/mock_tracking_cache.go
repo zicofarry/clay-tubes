@@ -6,7 +6,7 @@ import (
 	reflect "reflect"
 	time "time"
 
-	cache "github.com/zicofarry/clay-app/backend/services/tracking-service/internal/cache"
+	cache "github.com/zicofarry/clay-tubes/backend/services/tracking-service/internal/cache"
 	gomock "go.uber.org/mock/gomock"
 )
 

@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/chat-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/chat-service/internal/repository"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )

@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/payment-service/internal/broker"
-	"github.com/zicofarry/clay-app/backend/services/payment-service/internal/cache"
-	"github.com/zicofarry/clay-app/backend/services/payment-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/payment-service/internal/broker"
+	"github.com/zicofarry/clay-tubes/backend/services/payment-service/internal/cache"
+	"github.com/zicofarry/clay-tubes/backend/services/payment-service/internal/repository"
 )
 
 // ── Service Error ────────────────────────────────────────────────────────────

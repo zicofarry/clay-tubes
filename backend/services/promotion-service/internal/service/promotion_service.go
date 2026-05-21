@@ -7,7 +7,7 @@ import (
 	"errors"
 
 	"github.com/google/uuid"
-	"github.com/zicofarry/clay-app/backend/services/promotion-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/promotion-service/internal/repository"
 	"gorm.io/gorm"
 )
 

@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/security-service/internal/handler"
-	"github.com/zicofarry/clay-app/backend/services/security-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/services/security-service/mocks"
+	"github.com/zicofarry/clay-tubes/backend/services/security-service/internal/handler"
+	"github.com/zicofarry/clay-tubes/backend/services/security-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/services/security-service/mocks"
 	"go.uber.org/mock/gomock"
 )
 

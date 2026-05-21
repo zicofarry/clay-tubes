@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/sms-service/mocks/repomock"
+	"github.com/zicofarry/clay-tubes/backend/services/sms-service/mocks/repomock"
 	"go.uber.org/mock/gomock"
 )
 

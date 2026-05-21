@@ -7,11 +7,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/audit-log-service/internal/handler"
-	"github.com/zicofarry/clay-app/backend/services/audit-log-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/audit-log-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/middleware"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/services/audit-log-service/internal/handler"
+	"github.com/zicofarry/clay-tubes/backend/services/audit-log-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/audit-log-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )

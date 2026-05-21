@@ -14,7 +14,7 @@ import (
 	reflect "reflect"
 	time "time"
 
-	service "github.com/zicofarry/clay-app/backend/services/promotion-service/internal/service"
+	service "github.com/zicofarry/clay-tubes/backend/services/promotion-service/internal/service"
 	gomock "go.uber.org/mock/gomock"
 )
 

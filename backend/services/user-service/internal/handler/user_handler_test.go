@@ -11,8 +11,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
-	"github.com/zicofarry/clay-app/backend/services/user-service/internal/models"
-	"github.com/zicofarry/clay-app/backend/services/user-service/mocks"
+	"github.com/zicofarry/clay-tubes/backend/services/user-service/internal/models"
+	"github.com/zicofarry/clay-tubes/backend/services/user-service/mocks"
 	"go.uber.org/mock/gomock"
 )
 

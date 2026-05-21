@@ -13,8 +13,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/zicofarry/clay-app/backend/services/user-service/internal/models"
-	"github.com/zicofarry/clay-app/backend/services/user-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/user-service/internal/models"
+	"github.com/zicofarry/clay-tubes/backend/services/user-service/internal/repository"
 )
 
 func setupTestDB(t *testing.T) (*sql.DB, *redis.Client) {

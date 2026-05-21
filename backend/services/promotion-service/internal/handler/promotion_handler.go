@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/zicofarry/clay-app/backend/services/promotion-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/services/promotion-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
 )
 
 type PromotionHandler struct {

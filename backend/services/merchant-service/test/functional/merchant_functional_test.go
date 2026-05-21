@@ -10,8 +10,8 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
-	"github.com/zicofarry/clay-app/backend/services/merchant-service/internal/model"
-	"github.com/zicofarry/clay-app/backend/services/merchant-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/repository"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )

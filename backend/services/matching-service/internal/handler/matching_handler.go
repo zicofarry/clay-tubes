@@ -5,9 +5,9 @@ package handler
 import (
 	"net/http"
 
-	"github.com/zicofarry/clay-app/backend/services/matching-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/validator"
+	"github.com/zicofarry/clay-tubes/backend/services/matching-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/validator"
 )
 
 // MatchingHandler holds references to the service layer.

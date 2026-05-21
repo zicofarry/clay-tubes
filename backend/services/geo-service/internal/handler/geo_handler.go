@@ -5,9 +5,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/zicofarry/clay-app/backend/services/geo-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/validator"
+	"github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/validator"
 )
 
 type GeoHandler struct {

@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/zicofarry/clay-app/backend/services/merchant-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/model"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo/integration/mtest"
 )

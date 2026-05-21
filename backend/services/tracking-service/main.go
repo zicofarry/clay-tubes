@@ -5,10 +5,10 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/middleware"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
-	"github.com/zicofarry/clay-app/backend/services/tracking-service/internal/handler"
-	"github.com/zicofarry/clay-app/backend/services/tracking-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/services/tracking-service/internal/handler"
+	"github.com/zicofarry/clay-tubes/backend/services/tracking-service/internal/service"
 )
 
 func main() {

@@ -4,11 +4,11 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/zicofarry/clay-app/backend/services/food-order-service/internal/model"
-	"github.com/zicofarry/clay-app/backend/services/food-order-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/middleware"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/validator"
+	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/validator"
 )
 
 // FoodOrderHandler handles HTTP requests for food orders.

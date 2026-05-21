@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/zicofarry/clay-app/backend/services/tracking-service/internal/cache"
-	"github.com/zicofarry/clay-app/backend/services/tracking-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/tracking-service/mocks/cachemock"
-	"github.com/zicofarry/clay-app/backend/services/tracking-service/mocks/repomock"
+	"github.com/zicofarry/clay-tubes/backend/services/tracking-service/internal/cache"
+	"github.com/zicofarry/clay-tubes/backend/services/tracking-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/tracking-service/mocks/cachemock"
+	"github.com/zicofarry/clay-tubes/backend/services/tracking-service/mocks/repomock"
 	"go.uber.org/mock/gomock"
 )
 

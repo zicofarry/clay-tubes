@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/zicofarry/clay-app/backend/services/merchant-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/model"
 )
 
 // MerchantRepositoryInterface defines persistence operations for merchants.

@@ -14,7 +14,7 @@ import (
 	reflect "reflect"
 	time "time"
 
-	repository "github.com/zicofarry/clay-app/backend/services/chat-service/internal/repository"
+	repository "github.com/zicofarry/clay-tubes/backend/services/chat-service/internal/repository"
 	primitive "go.mongodb.org/mongo-driver/bson/primitive"
 	gomock "go.uber.org/mock/gomock"
 )

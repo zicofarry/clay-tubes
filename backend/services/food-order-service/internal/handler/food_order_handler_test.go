@@ -12,11 +12,11 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/zicofarry/clay-app/backend/services/food-order-service/internal/model"
-	"github.com/zicofarry/clay-app/backend/services/food-order-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/services/food-order-service/mocks"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/middleware"
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/model"
+	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/mocks"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
 	"go.uber.org/mock/gomock"
 )
 

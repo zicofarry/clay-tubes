@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/zicofarry/clay-app/backend/services/pricing-service/internal/service"
-	"github.com/zicofarry/clay-app/backend/services/pricing-service/mocks"
+	"github.com/zicofarry/clay-tubes/backend/services/pricing-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/services/pricing-service/mocks"
 	"go.uber.org/mock/gomock"
 )
 

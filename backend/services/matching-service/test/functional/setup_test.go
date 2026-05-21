@@ -20,9 +20,9 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
-	"github.com/zicofarry/clay-app/backend/services/matching-service/internal/geo"
-	"github.com/zicofarry/clay-app/backend/services/matching-service/internal/repository"
-	"github.com/zicofarry/clay-app/backend/services/matching-service/internal/service"
+	"github.com/zicofarry/clay-tubes/backend/services/matching-service/internal/geo"
+	"github.com/zicofarry/clay-tubes/backend/services/matching-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/matching-service/internal/service"
 )
 
 // redisAddr resolves the test Redis address. CI sets TEST_REDIS_ADDR from the

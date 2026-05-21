@@ -9,7 +9,7 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
-	"github.com/zicofarry/clay-app/backend/services/auth-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/auth-service/internal/repository"
 )
 
 func setupTestDB(t *testing.T) *sql.DB {

@@ -18,7 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/zicofarry/clay-app/backend/pkg/pkg/kafka"
+	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/kafka"
 )
 
 // ── Kafka Topics ─────────────────────────────────────────────────────────────
