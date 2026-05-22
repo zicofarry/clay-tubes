@@ -252,17 +252,17 @@ pipeline {
         //     }
         // }
 
-        stage('Promotion Service') {
-            when {
-                anyOf {
-                    changeset "backend/services/promotion-service/**"
-                    expression { env.BRANCH_NAME != 'main' }
-                }
-            }
-            steps {
-                buildAndDeploy('promotion-service', 'clay-promotion-service')
-            }
-        }
+        // stage('Promotion Service') {
+        //     when {
+        //         anyOf {
+        //             changeset "backend/services/promotion-service/**"
+        //             expression { env.BRANCH_NAME != 'main' }
+        //         }
+        //     }
+        //     steps {
+        //         buildAndDeploy('promotion-service', 'clay-promotion-service')
+        //     }
+        // }
 
         stage('Pricing Service') {
             when {
