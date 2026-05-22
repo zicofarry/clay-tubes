@@ -18,30 +18,62 @@ func TestSearchIntegration_Dependencies(t *testing.T) {
 
 	ctx := context.Background()
 
-	// 1. Cek Koneksi ke Elasticsearch
+	// 1. Cek Koneksi ke Elasticsearch (dengan retry karena Elasticsearch butuh beberapa detik untuk boot up)
 	t.Run("Elasticsearch Connection", func(t *testing.T) {
 		client := &http.Client{Timeout: 2 * time.Second}
-		resp, err := client.Get("http://localhost:9200")
-		if err != nil {
-			t.Fatalf("Elasticsearch is NOT running. Please run 'docker-compose up -d'. Error: %v", err)
-		}
-		defer resp.Body.Close()
+		var lastErr error
+		var lastStatus int
+		success := false
 
-		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("Elasticsearch returned status %d", resp.StatusCode)
+		maxAttempts := 30
+		for i := 0; i < maxAttempts; i++ {
+			resp, err := client.Get("http://localhost:9200")
+			if err == nil {
+				lastStatus = resp.StatusCode
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					success = true
+					break
+				}
+			} else {
+				lastErr = err
+			}
+			t.Logf("Waiting for Elasticsearch to be ready... (attempt %d/%d, error: %v)", i+1, maxAttempts, err)
+			time.Sleep(2 * time.Second)
+		}
+
+		if !success {
+			if lastErr != nil {
+				t.Fatalf("Elasticsearch is NOT running or not ready. Error: %v", lastErr)
+			} else {
+				t.Fatalf("Elasticsearch returned status %d", lastStatus)
+			}
 		}
 		t.Log("Successfully connected to Elasticsearch!")
 	})
 
-	// 2. Cek Koneksi ke Redis
+	// 2. Cek Koneksi ke Redis (dengan retry karena database docker butuh waktu singkat untuk init)
 	t.Run("Redis Connection", func(t *testing.T) {
 		rdb := redis.NewClient(&redis.Options{
 			Addr: "localhost:6389", // Sesuai dengan docker-compose.yml port 6389
 		})
 
-		err := rdb.Ping(ctx).Err()
-		if err != nil {
-			t.Fatalf("Redis is NOT running on port 6389. Please run 'docker-compose up -d'. Error: %v", err)
+		var lastErr error
+		success := false
+		maxAttempts := 10
+		for i := 0; i < maxAttempts; i++ {
+			err := rdb.Ping(ctx).Err()
+			if err == nil {
+				success = true
+				break
+			}
+			lastErr = err
+			t.Logf("Waiting for Redis to be ready... (attempt %d/%d, error: %v)", i+1, maxAttempts, err)
+			time.Sleep(1 * time.Second)
+		}
+
+		if !success {
+			t.Fatalf("Redis is NOT running on port 6389. Please run 'docker compose up -d'. Error: %v", lastErr)
 		}
 		t.Log("Successfully connected to Redis!")
 	})
