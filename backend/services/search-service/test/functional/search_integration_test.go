@@ -10,7 +10,7 @@ import (
 
 	"github.com/elastic/go-elasticsearch/v8"
 	"github.com/redis/go-redis/v9"
-	"github.com/zicofarry/clay-app/backend/services/search-service/internal/repository"
+	"github.com/zicofarry/clay-tubes/backend/services/search-service/internal/repository"
 )
 
 func TestSearchIntegration_Dependencies(t *testing.T) {
