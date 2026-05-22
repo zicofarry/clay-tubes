@@ -264,41 +264,41 @@ pipeline {
         //     }
         // }
 
-        stage('Pricing Service') {
-            when {
-                anyOf {
-                    changeset "backend/services/pricing-service/**"
-                    expression { env.BRANCH_NAME != 'main' }
-                }
-            }
-            steps {
-                buildAndDeploy('pricing-service', 'clay-pricing-service')
-            }
-        }
+        // stage('Pricing Service') {
+        //     when {
+        //         anyOf {
+        //             changeset "backend/services/pricing-service/**"
+        //             expression { env.BRANCH_NAME != 'main' }
+        //         }
+        //     }
+        //     steps {
+        //         buildAndDeploy('pricing-service', 'clay-pricing-service')
+        //     }
+        // }
 
-        stage('Wallet Service') {
-            when {
-                anyOf {
-                    changeset "backend/services/wallet-service/**"
-                    expression { env.BRANCH_NAME != 'main' }
-                }
-            }
-            steps {
-                buildAndDeploy('wallet-service', 'clay-wallet-service')
-            }
-        }
+        // stage('Wallet Service') {
+        //     when {
+        //         anyOf {
+        //             changeset "backend/services/wallet-service/**"
+        //             expression { env.BRANCH_NAME != 'main' }
+        //         }
+        //     }
+        //     steps {
+        //         buildAndDeploy('wallet-service', 'clay-wallet-service')
+        //     }
+        // }
 
-        stage('History Service') {
-            when {
-                anyOf {
-                    changeset "backend/services/history-service/**"
-                    expression { env.BRANCH_NAME != 'main' }
-                }
-            }
-            steps {
-                buildAndDeploy('history-service', 'clay-history-service')
-            }
-        }
+        // stage('History Service') {
+        //     when {
+        //         anyOf {
+        //             changeset "backend/services/history-service/**"
+        //             expression { env.BRANCH_NAME != 'main' }
+        //         }
+        //     }
+        //     steps {
+        //         buildAndDeploy('history-service', 'clay-history-service')
+        //     }
+        // }
 
         stage('Tracking Service') {
             when {
