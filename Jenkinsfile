@@ -192,17 +192,17 @@ pipeline {
         //     }
         // }
 
-        // stage('Search Service') {
-        //     when {
-        //         anyOf {
-        //             changeset "backend/services/search-service/**"
-        //             expression { env.BRANCH_NAME != 'main' }
-        //         }
-        //     }
-        //     steps {
-        //         buildAndDeploy('search-service', 'clay-search-service')
-        //     }
-        // }
+        stage('Search Service') {
+            when {
+                anyOf {
+                    changeset "backend/services/search-service/**"
+                    expression { env.BRANCH_NAME != 'main' }
+                }
+            }
+            steps {
+                buildAndDeploy('search-service', 'clay-search-service')
+            }
+        }
 
         // stage('Geo Service') {
         //     when {
@@ -300,41 +300,41 @@ pipeline {
         //     }
         // }
 
-        stage('Tracking Service') {
-            when {
-                anyOf {
-                    changeset "backend/services/tracking-service/**"
-                    expression { env.BRANCH_NAME != 'main' }
-                }
-            }
-            steps {
-                buildAndDeploy('tracking-service', 'clay-tracking-service')
-            }
-        }
+        // stage('Tracking Service') {
+        //     when {
+        //         anyOf {
+        //             changeset "backend/services/tracking-service/**"
+        //             expression { env.BRANCH_NAME != 'main' }
+        //         }
+        //     }
+        //     steps {
+        //         buildAndDeploy('tracking-service', 'clay-tracking-service')
+        //     }
+        // }
 
-        stage('Audit Log Service') {
-            when {
-                anyOf {
-                    changeset "backend/services/audit-log-service/**"
-                    expression { env.BRANCH_NAME != 'main' }
-                }
-            }
-            steps {
-                buildAndDeploy('audit-log-service', 'clay-audit-log-service')
-            }
-        }
+        // stage('Audit Log Service') {
+        //     when {
+        //         anyOf {
+        //             changeset "backend/services/audit-log-service/**"
+        //             expression { env.BRANCH_NAME != 'main' }
+        //         }
+        //     }
+        //     steps {
+        //         buildAndDeploy('audit-log-service', 'clay-audit-log-service')
+        //     }
+        // }
 
-        stage('Security Service') {
-            when {
-                anyOf {
-                    changeset "backend/services/security-service/**"
-                    expression { env.BRANCH_NAME != 'main' }
-                }
-            }
-            steps {
-                buildAndDeploy('security-service', 'clay-security-service')
-            }
-        }
+        // stage('Security Service') {
+        //     when {
+        //         anyOf {
+        //             changeset "backend/services/security-service/**"
+        //             expression { env.BRANCH_NAME != 'main' }
+        //         }
+        //     }
+        //     steps {
+        //         buildAndDeploy('security-service', 'clay-security-service')
+        //     }
+        // }
     }
 
     post {
