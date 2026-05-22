@@ -228,29 +228,29 @@ pipeline {
         //     }
         // }
 
-        stage('Merchant Service') {
-            when {
-                anyOf {
-                    changeset "backend/services/merchant-service/**"
-                    expression { env.BRANCH_NAME != 'main' }
-                }
-            }
-            steps {
-                buildAndDeploy('merchant-service', 'clay-merchant-service')
-            }
-        }
+        // stage('Merchant Service') {
+        //     when {
+        //         anyOf {
+        //             changeset "backend/services/merchant-service/**"
+        //             expression { env.BRANCH_NAME != 'main' }
+        //         }
+        //     }
+        //     steps {
+        //         buildAndDeploy('merchant-service', 'clay-merchant-service')
+        //     }
+        // }
 
-        stage('Rating Service') {
-            when {
-                anyOf {
-                    changeset "backend/services/rating-service/**"
-                    expression { env.BRANCH_NAME != 'main' }
-                }
-            }
-            steps {
-                buildAndDeploy('rating-service', 'clay-rating-service')
-            }
-        }
+        // stage('Rating Service') {
+        //     when {
+        //         anyOf {
+        //             changeset "backend/services/rating-service/**"
+        //             expression { env.BRANCH_NAME != 'main' }
+        //         }
+        //     }
+        //     steps {
+        //         buildAndDeploy('rating-service', 'clay-rating-service')
+        //     }
+        // }
 
         stage('Promotion Service') {
             when {
