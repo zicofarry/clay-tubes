@@ -6,9 +6,9 @@ import (
 
 	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/model"
 	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/service"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/validator"
+	"github.com/zicofarry/clay-tubes/backend/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/validator"
 )
 
 // MerchantHandler handles HTTP requests for merchant and menu operations.

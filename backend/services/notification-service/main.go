@@ -8,9 +8,9 @@ import (
 	"github.com/zicofarry/clay-tubes/backend/services/notification-service/internal/handler"
 	"github.com/zicofarry/clay-tubes/backend/services/notification-service/internal/repository"
 	"github.com/zicofarry/clay-tubes/backend/services/notification-service/internal/service"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/database"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/database"
+	"github.com/zicofarry/clay-tubes/backend/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
 )
 
 func main() {

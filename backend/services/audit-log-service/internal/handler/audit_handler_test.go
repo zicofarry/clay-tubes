@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/zicofarry/clay-tubes/backend/services/audit-log-service/internal/service"
 	"github.com/zicofarry/clay-tubes/backend/services/audit-log-service/mocks"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
 	"go.uber.org/mock/gomock"
 )
 

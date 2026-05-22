@@ -9,9 +9,9 @@ import (
 	"github.com/zicofarry/clay-tubes/backend/services/user-service/internal/repository"
 	"github.com/zicofarry/clay-tubes/backend/services/user-service/internal/service"
 	"github.com/redis/go-redis/v9"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/database"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/database"
+	"github.com/zicofarry/clay-tubes/backend/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
 	_ "github.com/lib/pq"
 )
 

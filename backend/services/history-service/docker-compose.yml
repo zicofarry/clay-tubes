@@ -30,19 +30,5 @@ services:
       - "9023:8080" 
     depends_on:
       - postgres-history
-
-  history-service:
-    build: .
-    container_name: clay_history_service
-    ports:
-      - "8023:8023" 
-    environment:
-      - POSTGRES_DSN=host=postgres-history user=clay_user password=clay_password dbname=history_db port=5432 sslmode=disable TimeZone=UTC
-      - REDIS_ADDR=redis-history:6379
-      - PORT=8023
-    depends_on:
-      - postgres-history
-      - redis-history
-
 volumes:
   postgres_history_data:

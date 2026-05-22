@@ -6,8 +6,8 @@ import (
 	"net/http"
 
 	"github.com/zicofarry/clay-tubes/backend/services/auth-service/internal/service"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/validator"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/validator"
 )
 
 // AuthHandler holds references to the auth service layer.

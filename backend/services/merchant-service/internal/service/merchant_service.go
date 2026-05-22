@@ -8,7 +8,7 @@ import (
 
 	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/model"
 	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/repository"
-	sharedKafka "github.com/zicofarry/clay-tubes/backend/pkg/pkg/kafka"
+	sharedKafka "github.com/zicofarry/clay-tubes/backend/pkg/kafka"
 )
 
 const (

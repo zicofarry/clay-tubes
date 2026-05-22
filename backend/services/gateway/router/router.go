@@ -5,9 +5,11 @@
 package router
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/zicofarry/clay-tubes/backend/services/gateway/config"
@@ -15,21 +17,28 @@ import (
 	"github.com/zicofarry/clay-tubes/backend/services/gateway/proxy"
 )
 
+type routeMatcher struct {
+	pathPattern string
+	methods     map[string]bool
+	regex       *regexp.Regexp
+	handler     http.Handler
+}
+
 // Build constructs and returns the root http.Handler for the gateway.
-// It wires up every route from routes.yaml with its full middleware chain.
+// It wires up every route from routes.yaml using a regex-based matcher.
 func Build(
 	routes []config.Route,
 	cfg *config.Config,
 	rateLimiter *middleware.RateLimiter,
 	logger *slog.Logger,
 ) (http.Handler, error) {
-	mux := http.NewServeMux()
-
-	// Cache proxy handlers per upstream+prefix to reuse connections
+	var matchers []routeMatcher
 	proxyCache := map[string]http.Handler{}
 
+	// Compile regex helper to replace {param} with [^/]+
+	paramRegex := regexp.MustCompile(`\\\{[^\\\}]+\\\}`)
+
 	for _, route := range routes {
-		// Build/reuse proxy for this upstream
 		cacheKey := route.Upstream + "|" + route.StripPrefix
 		rp, ok := proxyCache[cacheKey]
 		if !ok {
@@ -43,40 +52,73 @@ func Build(
 
 		authRule := config.ParseAuthRule(route.Auth)
 
-		// Convert {param} → go mux pattern (1.22+ supports {param})
-		pattern := convertPath(route.Path)
+		// Create the route's handler chain
+		handler := buildChain(
+			rp,
+			cfg,
+			authRule,
+			rateLimiter,
+			route.RateLimit,
+			route.Path,
+			logger,
+		)
 
-		// Register one pattern per method to allow different auth/rate per method
-		for _, method := range route.Methods {
-			handler := buildChain(
-				rp,
-				cfg,
-				authRule,
-				rateLimiter,
-				route.RateLimit,
-				route.Path, // used as rate-limit key (pattern, not request path)
-				logger,
-			)
-			mux.Handle(fmt.Sprintf("%s %s", strings.ToUpper(method), pattern), handler)
+		// Clean and compile the path pattern to regex
+		cleanPattern := cleanPath(route.Path)
+		escapedPattern := regexp.QuoteMeta(cleanPattern)
+		regexPattern := "^" + paramRegex.ReplaceAllString(escapedPattern, `[^/]+`) + "$"
+		
+		compiledRegex, err := regexp.Compile(regexPattern)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compile regex for route %s: %w", route.Path, err)
 		}
+
+		methodsMap := make(map[string]bool)
+		for _, m := range route.Methods {
+			methodsMap[strings.ToUpper(m)] = true
+		}
+
+		matchers = append(matchers, routeMatcher{
+			pathPattern: route.Path,
+			methods:     methodsMap,
+			regex:       compiledRegex,
+			handler:     handler,
+		})
 	}
 
-	// Health check — no auth, no rate limit
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok","service":"clay-gateway"}`))
-	})
+	// Define the root dynamic router handler
+	routerHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqPath := cleanPath(r.URL.Path)
 
-	// 404 fallback
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// 1. Health check (highest priority, no auth/rate limit)
+		if r.Method == http.MethodGet && reqPath == "/health" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"ok","service":"clay-gateway"}`))
+			return
+		}
+
+		// 2. Match request against routes in order
+		reqMethod := strings.ToUpper(r.Method)
+		for _, matcher := range matchers {
+			if matcher.methods[reqMethod] && matcher.regex.MatchString(reqPath) {
+				matcher.handler.ServeHTTP(w, r)
+				return
+			}
+		}
+
+		// 3. 404 Fallback
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusNotFound)
-		fmt.Fprintf(w, `{"code":"NOT_FOUND","message":"route %q not found"}`, r.URL.Path)
+		resp := map[string]string{
+			"code":    "NOT_FOUND",
+			"message": fmt.Sprintf("route %s not found", r.URL.Path),
+		}
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 
-	// Apply global middleware to the entire mux
-	return applyGlobal(mux, cfg, logger), nil
+	// Apply global middleware to the entire router
+	return applyGlobal(routerHandler, cfg, logger), nil
 }
 
 // buildChain assembles the per-route middleware chain.
@@ -103,10 +145,10 @@ func buildChain(
 	return h
 }
 
-// applyGlobal wraps the entire mux with gateway-level middleware.
+// applyGlobal wraps the entire router with gateway-level middleware.
 // Order (outermost first): Recovery → RequestID → AccessLog → CORS
-func applyGlobal(mux http.Handler, cfg *config.Config, logger *slog.Logger) http.Handler {
-	h := mux
+func applyGlobal(router http.Handler, cfg *config.Config, logger *slog.Logger) http.Handler {
+	h := router
 	h = cors(cfg.CORSOrigins)(h)
 	h = middleware.AccessLog(logger)(h)
 	h = middleware.RequestID(h)
@@ -135,12 +177,8 @@ func cors(origins []string) func(http.Handler) http.Handler {
 	}
 }
 
-// convertPath converts OpenAPI-style {param} path params to Go 1.22 mux syntax.
-// e.g. /orders/{orderId}/cancel → /orders/{orderId}/cancel  (already compatible)
-// Also normalises trailing slashes.
-func convertPath(path string) string {
-	// Go 1.22 mux already supports {param} syntax natively — no conversion needed.
-	// Strip trailing slash (except root)
+// cleanPath normalizes path by stripping trailing slashes.
+func cleanPath(path string) string {
 	if len(path) > 1 && strings.HasSuffix(path, "/") {
 		path = path[:len(path)-1]
 	}

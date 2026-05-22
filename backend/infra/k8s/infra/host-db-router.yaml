@@ -1,0 +1,989 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-gateway
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6370
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-gateway
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6370
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-auth
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5431
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-auth
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5431
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-auth
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6371
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-auth
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6371
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-user
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-user
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5432
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-user
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6372
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-user
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6372
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-email
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5433
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-email
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5433
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-email
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6373
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-email
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6373
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-payment
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5434
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-payment
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5434
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-payment
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6374
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-payment
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6374
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-notification
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5435
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-notification
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5435
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-tracking
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6376
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-tracking
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6376
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo-tracking
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 27017
+      targetPort: 27019
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: mongo-tracking
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 27019
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo-audit
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 27017
+      targetPort: 27018
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: mongo-audit
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 27018
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo-chat
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 27017
+      targetPort: 27017
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: mongo-chat
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 27017
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-geo
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5439
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-geo
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5439
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-geo
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-geo
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-matching
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6380
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-matching
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6380
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-merchant
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5441
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-merchant
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5441
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo-merchant
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 27017
+      targetPort: 27020
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: mongo-merchant
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 27020
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-pricing
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5442
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-pricing
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5442
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-pricing
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6382
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-pricing
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6382
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-promotion
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5443
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-promotion
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-promotion
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6383
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-promotion
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6383
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-rating
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5445
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-rating
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5445
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-rating
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6385
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-rating
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6385
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-ride-order
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5446
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-ride-order
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5446
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-ride-order
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6386
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-ride-order
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6386
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-food-order
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5447
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-food-order
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5447
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-food-order
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6387
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-food-order
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6387
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongo-food-order
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 27017
+      targetPort: 27021
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: mongo-food-order
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 27021
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-delivery-order
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5448
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-delivery-order
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5448
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-delivery-order
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6388
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-delivery-order
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6388
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-search
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6389
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-search
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6389
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: elasticsearch
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 9200
+      targetPort: 9200
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: elasticsearch
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 9200
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-security
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5450
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-security
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5450
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-security
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6390
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-security
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6390
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-sms
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5451
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-sms
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5451
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sms
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6391
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-sms
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6391
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-wallet
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5452
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-wallet
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5452
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-wallet
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6392
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-wallet
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6392
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-history
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 5432
+      targetPort: 5453
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: postgres-history
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 5453
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-history
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 6379
+      targetPort: 6393
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: redis-history
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 6393
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: clay
+spec:
+  ports:
+    - name: tcp
+      port: 9092
+      targetPort: 9092
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: kafka
+  namespace: clay
+subsets:
+  - addresses:
+      - ip: 192.168.65.254
+    ports:
+      - name: tcp
+        port: 9092

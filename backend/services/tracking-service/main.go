@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/database"
+	"github.com/zicofarry/clay-tubes/backend/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
 	"github.com/zicofarry/clay-tubes/backend/services/tracking-service/internal/handler"
+	"github.com/zicofarry/clay-tubes/backend/services/tracking-service/internal/repository"
 	"github.com/zicofarry/clay-tubes/backend/services/tracking-service/internal/service"
 )
 
@@ -16,8 +18,24 @@ func main() {
 	slog.SetDefault(logger)
 
 	// ── Dependencies ─────────────────────────────────────────────────────
-	// TODO: Wire real MongoDB and Redis clients here.
-	trackingSvc := service.NewTrackingService(nil, nil, logger)
+	mongoCfg := database.DefaultMongoConfig("clay_tracking")
+	if uri := os.Getenv("MONGO_URI"); uri != "" {
+		mongoCfg.URI = uri
+	}
+	if dbName := os.Getenv("MONGO_DB"); dbName != "" {
+		mongoCfg.Database = dbName
+	}
+	mongoClient, mongoDb, err := database.NewMongoClient(mongoCfg)
+	if err != nil {
+		logger.Error("failed to connect to mongodb", slog.Any("error", err))
+		os.Exit(1)
+	}
+	_ = mongoClient // Ignore unused variable
+	// Note: We don't defer Disconnect here so the app can continue running
+	// Normally this is handled by graceful shutdown
+
+	trackingRepo := repository.NewTrackingRepository(mongoDb)
+	trackingSvc := service.NewTrackingService(trackingRepo, nil, logger)
 	trackingHandler := handler.NewTrackingHandler(trackingSvc)
 
 	// ── Router ───────────────────────────────────────────────────────────

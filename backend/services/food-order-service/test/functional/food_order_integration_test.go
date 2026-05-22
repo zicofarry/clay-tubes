@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/model"
 	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/repository"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/database"
+	"github.com/zicofarry/clay-tubes/backend/pkg/database"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 

@@ -24,18 +24,5 @@ services:
       ME_CONFIG_MONGODB_URL: mongodb://mongo-audit:27017/
     depends_on:
       - mongo-audit
-
-  audit-service:
-    build: .
-    container_name: clay_audit_service
-    ports:
-      - "8007:8007"
-    environment:
-      - MONGO_URI=mongodb://mongo-audit:27017
-      - MONGO_DB_NAME=audit_db
-      - PORT=8007
-    depends_on:
-      - mongo-audit
-
 volumes:
   mongo_audit_data:

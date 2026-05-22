@@ -6,8 +6,8 @@ import (
 	"net/http"
 
 	"github.com/zicofarry/clay-tubes/backend/services/matching-service/internal/service"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/validator"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/validator"
 )
 
 // MatchingHandler holds references to the service layer.

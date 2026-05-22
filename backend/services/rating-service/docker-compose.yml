@@ -30,19 +30,5 @@ services:
       - "9015:8080" 
     depends_on:
       - postgres-rating
-
-  rating-service:
-    build: .
-    container_name: clay_rating_service
-    ports:
-      - "8015:8015" 
-    environment:
-      - POSTGRES_DSN=host=postgres-rating user=clay_user password=clay_password dbname=rating_db port=5432 sslmode=disable TimeZone=UTC
-      - REDIS_ADDR=redis-rating:6379
-      - PORT=8015
-    depends_on:
-      - postgres-rating
-      - redis-rating
-
 volumes:
   postgres_rating_data:

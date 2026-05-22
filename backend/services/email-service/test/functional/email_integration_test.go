@@ -1,3 +1,5 @@
+//go:build functional
+
 package functional
 
 import (
@@ -13,7 +15,7 @@ import (
 	"github.com/zicofarry/clay-tubes/backend/services/email-service/internal/model"
 	"github.com/zicofarry/clay-tubes/backend/services/email-service/internal/repository"
 	"github.com/zicofarry/clay-tubes/backend/services/email-service/internal/service"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/middleware"
 )
 
 func setupTestServer() *httptest.Server {

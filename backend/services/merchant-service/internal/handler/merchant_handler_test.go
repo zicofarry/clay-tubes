@@ -14,7 +14,7 @@ import (
 	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/model"
 	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/service"
 	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/mocks"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
 	"go.uber.org/mock/gomock"
 )
 

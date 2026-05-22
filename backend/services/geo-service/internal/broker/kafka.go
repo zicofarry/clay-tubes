@@ -8,7 +8,7 @@ import (
 	"log/slog"
 
 	"github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/cache"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/kafka"
+	"github.com/zicofarry/clay-tubes/backend/pkg/kafka"
 )
 
 const (

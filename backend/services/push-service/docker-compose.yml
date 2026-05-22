@@ -1,19 +1,5 @@
 
 services:
-  push-service:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: clay_push_service
-    ports:
-      - "8014:8014"
-    environment:
-      PORT: "8014"
-      REDIS_URL: "redis:6379"
-    restart: unless-stopped
-    depends_on:
-      - redis
-
   redis:
     image: redis:alpine
     container_name: clay_push_redis

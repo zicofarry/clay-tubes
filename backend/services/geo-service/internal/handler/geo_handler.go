@@ -6,8 +6,8 @@ import (
 	"strconv"
 
 	"github.com/zicofarry/clay-tubes/backend/services/geo-service/internal/service"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/validator"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/validator"
 )
 
 type GeoHandler struct {

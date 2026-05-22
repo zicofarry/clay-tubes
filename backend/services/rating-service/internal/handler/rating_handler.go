@@ -6,7 +6,7 @@ import (
 	"strconv"
 
 	"github.com/zicofarry/clay-tubes/backend/services/rating-service/internal/service"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
 )
 
 type RatingHandler struct {

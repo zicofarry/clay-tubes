@@ -11,7 +11,8 @@ COPY services/matching-service/ /app/services/matching-service/
 
 # Build the binary using local module resolution (ignores go.work)
 ENV GOWORK=off
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /matching-service ./main.go
+RUN --mount=type=cache,target=/go/pkg/mod \
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /matching-service ./main.go
 
 # Final stage
 FROM alpine:3.19

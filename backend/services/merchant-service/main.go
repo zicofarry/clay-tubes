@@ -14,10 +14,10 @@ import (
 	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/handler"
 	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/repository"
 	"github.com/zicofarry/clay-tubes/backend/services/merchant-service/internal/service"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/database"
-	sharedKafka "github.com/zicofarry/clay-tubes/backend/pkg/pkg/kafka"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/database"
+	sharedKafka "github.com/zicofarry/clay-tubes/backend/pkg/kafka"
+	"github.com/zicofarry/clay-tubes/backend/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
 )
 
 func main() {

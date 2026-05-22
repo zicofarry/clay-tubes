@@ -6,9 +6,9 @@ import (
 
 	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/model"
 	"github.com/zicofarry/clay-tubes/backend/services/food-order-service/internal/service"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/middleware"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/validator"
+	"github.com/zicofarry/clay-tubes/backend/pkg/middleware"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/validator"
 )
 
 // FoodOrderHandler handles HTTP requests for food orders.

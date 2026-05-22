@@ -24,18 +24,5 @@ services:
       ME_CONFIG_MONGODB_URL: mongodb://mongo-chat:27017/
     depends_on:
       - mongo-chat
-
-  chat-service:
-    build: .
-    container_name: clay_chat_service
-    ports:
-      - "8008:8008" # Based on PORT_MAPPING.md
-    environment:
-      - MONGO_URI=mongodb://mongo-chat:27017
-      - MONGO_DB_NAME=chat_db
-      - PORT=8008
-    depends_on:
-      - mongo-chat
-
 volumes:
   mongo_chat_data:

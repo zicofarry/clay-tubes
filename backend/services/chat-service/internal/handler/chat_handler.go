@@ -6,7 +6,7 @@ import (
 	"strconv"
 
 	"github.com/zicofarry/clay-tubes/backend/services/chat-service/internal/service"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
 )
 
 type ChatHandler struct {

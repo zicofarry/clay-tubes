@@ -6,7 +6,7 @@ import (
 
 	"github.com/zicofarry/clay-tubes/backend/services/email-service/internal/model"
 	"github.com/zicofarry/clay-tubes/backend/services/email-service/internal/service"
-	"github.com/zicofarry/clay-tubes/backend/pkg/pkg/response"
+	"github.com/zicofarry/clay-tubes/backend/pkg/response"
 )
 
 type EmailHandler struct {
